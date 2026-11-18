@@ -113,7 +113,7 @@
     <string name="settings_subpixel_circle_label">Sub-Pixel Hough Circle Refinement</string>
     <string name="settings_subpixel_circle_desc">Uses Sobel gradient radial Hough votes to lock disc centers within 0.2px and separate touching break clusters.</string>
     <string name="settings_closed_loop_slider_label">Closed-Loop Slider Verification</string>
-    <string name="settings_closed_loop_slider_desc">Re-reads striker X after sliding, learns game slider gain, and micro-corrects alignment before firing.</string>
+    <string name="settings_closed_loop_slider_desc">Saves every pre/post-slide board scan into turn memory, slides as needed within 9s, and fuses all data to fire a kiss-free, foul-free Sure Shot.</string>
     <string name="live_stream_active_badge">Live Stream ON (0ms)</string>
     <string name="live_stream_enable_badge">Enable Live Stream</string>
 </resources>

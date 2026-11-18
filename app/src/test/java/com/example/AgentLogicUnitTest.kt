@@ -1357,4 +1357,137 @@ class AgentLogicUnitTest {
         val decayedRisk = cleanEval.updatedMemory.scratchHeatmap.riskFor(1, 8f, 0.72f)
         assertTrue("Expected clean pot to decay zone risk ($decayedRisk < $zoneRiskAfterFoul)", decayedRisk < zoneRiskAfterFoul)
     }
+
+    @Test
+    fun `physics rollout detects target kiss deflection and picks zero-kiss foul-free sure shot`() {
+        val board = com.example.game.CarromBoardLayout(
+            left = 60f,
+            top = 500f,
+            right = 1020f,
+            bottom = 1460f,
+            pockets = listOf(
+                com.example.game.Point2D(120f, 560f),
+                com.example.game.Point2D(960f, 560f),
+                com.example.game.Point2D(120f, 1400f),
+                com.example.game.Point2D(960f, 1400f)
+            ),
+            baselineY = 1320f,
+            coinRadiusPx = 28f,
+            strikerRadiusPx = 35f,
+            pocketRadiusPx = 50f
+        )
+        val striker = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.STRIKER,
+            center = com.example.game.Point2D(540f, 1320f),
+            radiusPx = 35f
+        )
+
+        // Coin A (top-left) has a black coin brushing its forward shoulder near the edge -> kiss deflection makes it miss
+        val kissCoinA = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.WHITE,
+            center = com.example.game.Point2D(320f, 760f),
+            radiusPx = 28f
+        )
+        val kissBlocker = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.BLACK,
+            center = com.example.game.Point2D(245f, 710f), // overlaps coin-to-pocket corridor by ~18px
+            radiusPx = 28f
+        )
+
+        // Coin B (top-right) has a completely open path -> clean Sure Shot
+        val clearCoinB = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.WHITE,
+            center = com.example.game.Point2D(760f, 760f),
+            radiusPx = 28f
+        )
+
+        val ghostA = kissCoinA.center - (board.pockets[0] - kissCoinA.center).normalized() * 63f
+        val candA = com.example.game.RolloutCandidate(
+            strikerPos = striker.center,
+            baseDir = (ghostA - striker.center).normalized(),
+            ghostBall = ghostA,
+            targetCoin = kissCoinA,
+            targetPocket = board.pockets[0],
+            pocketIndex = 0,
+            cutAngleDeg = 18f,
+            isBankShot = false,
+            isComboShot = false,
+            isBreakShot = false,
+            basePullMultiplier = 1.0f,
+            staticScore = 0.86f,
+            totalDistance = (board.pockets[0] - striker.center).length()
+        )
+
+        val ghostB = clearCoinB.center - (board.pockets[1] - clearCoinB.center).normalized() * 63f
+        val candB = com.example.game.RolloutCandidate(
+            strikerPos = striker.center,
+            baseDir = (ghostB - striker.center).normalized(),
+            ghostBall = ghostB,
+            targetCoin = clearCoinB,
+            targetPocket = board.pockets[1],
+            pocketIndex = 1,
+            cutAngleDeg = 18f,
+            isBankShot = false,
+            isComboShot = false,
+            isBreakShot = false,
+            basePullMultiplier = 1.0f,
+            staticScore = 0.84f,
+            totalDistance = (board.pockets[1] - striker.center).length()
+        )
+
+        val verified = com.example.game.CarromPhysicsSimulator.verifyAndRefineCandidates(
+            board = board,
+            pieces = listOf(kissCoinA, kissBlocker, clearCoinB, striker),
+            myCoinColor = com.example.game.CoinColor.WHITE,
+            candidates = listOf(candA, candB),
+            shotMemory = null,
+            matchCalibration = null
+        )
+
+        org.junit.Assert.assertNotNull(verified)
+        val (winner, result) = verified!!
+        assertEquals(1, winner.pocketIndex)
+        assertFalse(result.predictedKissBlock)
+        assertFalse(result.predictedScratchFoul)
+        assertTrue(result.isSureShot)
+    }
+
+    @Test
+    fun `turn memory enforces 9s clock allows unlimited slides in budget and fuses multi-frame scans`() {
+        val tm = com.example.game.CarromTurnMemory()
+        val t0 = 10_000L
+
+        val coin1Frame1 = com.example.game.CarromPiece(com.example.game.CoinColor.WHITE, com.example.game.Point2D(300f, 700f), 28f)
+        val coin2Frame1 = com.example.game.CarromPiece(com.example.game.CoinColor.BLACK, com.example.game.Point2D(600f, 800f), 28f)
+        val striker1 = com.example.game.CarromPiece(com.example.game.CoinColor.STRIKER, com.example.game.Point2D(540f, 1320f), 35f)
+
+        // Frame 1 (pre-slide): can slide infinitely as long as time remains under 9s
+        tm.recordObservation(t0, listOf(coin1Frame1, coin2Frame1), striker1, com.example.game.Point2D(540f, 1600f), null, null)
+        assertTrue(tm.canAffordAnotherSliderMove(t0 + 1_000L, isLiveStreamActive = true))
+        tm.recordSliderMoveDispatched(540f)
+
+        // Frame 2 (after slide #1): slight jitter on coin1, slider gain refined
+        val coin1Frame2 = com.example.game.CarromPiece(com.example.game.CoinColor.WHITE, com.example.game.Point2D(304f, 698f), 28f)
+        tm.recordObservation(t0 + 1_200L, listOf(coin1Frame2, coin2Frame1), striker1.copy(center = com.example.game.Point2D(420f, 1320f)), com.example.game.Point2D(420f, 1600f), null, 0.92f)
+        assertTrue(tm.canAffordAnotherSliderMove(t0 + 3_500L, isLiveStreamActive = true))
+        tm.recordSliderMoveDispatched(420f)
+        tm.recordSliderMoveDispatched(360f)
+        tm.recordSliderMoveDispatched(330f)
+        assertEquals(4, tm.sliderMovesThisTurn)
+
+        // Frame 3: coin2 temporarily missed by glare -> consensus fusion still preserves coin2 AND averages coin1
+        tm.recordObservation(t0 + 4_000L, listOf(coin1Frame1), striker1.copy(center = com.example.game.Point2D(310f, 1320f)), com.example.game.Point2D(310f, 1600f), null, 0.94f)
+        val fused = tm.buildConsensusPieces(listOf(coin1Frame1), coinRadiusPx = 28f)
+        assertEquals(2, fused.size)
+        val fusedWhite = fused.first { it.color == com.example.game.CoinColor.WHITE }
+        assertTrue("Expected stabilized X between 300 and 304, got ${fusedWhite.center.x}", fusedWhite.center.x in 300.1f..303.5f)
+
+        // Hard 9s turn clock cutoffs prevent exceeding 9,000ms
+        assertFalse(tm.canAffordAnotherSliderMove(t0 + 7_900L, isLiveStreamActive = true))
+        assertFalse(tm.canAffordAnotherSliderMove(t0 + 6_800L, isLiveStreamActive = false))
+
+        tm.resetTurn()
+        assertFalse(tm.isTurnActive)
+        assertEquals(0, tm.sliderMovesThisTurn)
+    }
 }

@@ -9,6 +9,7 @@ import com.example.game.CarromGeometrySolver
 import com.example.game.CarromMemoryData
 import com.example.game.CarromPowerStyle
 import com.example.game.CarromShotMemoryStore
+import com.example.game.CarromTurnMemory
 import com.example.game.CarromVisionDetector
 import com.example.game.CarromVisionOutcome
 import com.example.game.CoinColor
@@ -325,10 +326,11 @@ object AgentCoordinator {
                 var pendingCacheCandidate: PendingCacheCandidate? = null
                 var lastReplayEntry: Pair<String, String>? = null
                 var carromOfflineWaits = 0
-                var justRepositionedCarromSlider = false
+                var didSlideCarromThisStep = false
                 var movedStrikerThisTurn = false
                 var pendingSliderVerify: PendingSliderVerify? = null
                 var pendingCarromShot: PendingCarromShotRecord? = null
+                val carromTurnMemory = CarromTurnMemory()
                 val awaitingRepliesByPeer = mutableMapOf<String, ChatTurnGuard.AwaitingReplyState>()
                 var pendingSentTextForPeer: Pair<String, String>? = null
                 var prevCompositeScreen: String? = null
@@ -541,18 +543,25 @@ object AgentCoordinator {
                         )
                     } else if (cacheMatch != null) {
                         carromOfflineWaits = 0
-                        justRepositionedCarromSlider = false
+                        didSlideCarromThisStep = false
+                        carromTurnMemory.resetTurn()
                         snapshot.screenshot?.recycle()
                         lastReplayEntry = cacheMatch.entry.cacheKey to currentCompositeScreen
                         cacheMatch.action
                     } else {
+                        didSlideCarromThisStep = false
                         val localCarromAction: PlannedAction? = if (
                             currentSettings.carromPrecisionSolver &&
                             isActiveCarromMatchScreen &&
                             interactiveNodeCount < 18 &&
                             snapshot.screenshot != null
                         ) {
+                            val nowCarromMs = System.currentTimeMillis()
+                            val isLiveStream = LiveMediaProjectionCapturer.isLiveActive.value
                             val currentCarromMem = _carromMemory.value
+                            val allowRepositionByBudget = !carromTurnMemory.isTurnActive ||
+                                carromTurnMemory.canAffordAnotherSliderMove(nowCarromMs, isLiveStream)
+
                             val outcome = CarromVisionDetector.analyzeAndSolve(
                                 screenshot = snapshot.screenshot,
                                 screenWidth = snapshot.screenWidth,
@@ -560,7 +569,7 @@ object AgentCoordinator {
                                 myCoinColor = myCarromCoinColor,
                                 consecutiveOfflineWaits = carromOfflineWaits,
                                 shotMemory = currentCarromMem,
-                                allowStrikerRepositioning = !justRepositionedCarromSlider,
+                                allowStrikerRepositioning = allowRepositionByBudget,
                                 usePhysicsRollout = currentSettings.usePhysicsRollout,
                                 useSubPixelRefinement = currentSettings.useSubPixelCircleRefinement
                             )
@@ -610,15 +619,15 @@ object AgentCoordinator {
                             when (outcome) {
                                 is CarromVisionOutcome.WaitStillnessOrTurn -> {
                                     carromOfflineWaits++
-                                    justRepositionedCarromSlider = false
                                     pendingSliderVerify = null
+                                    carromTurnMemory.resetTurn()
                                     PlannedAction(
                                         actionType = AgentActionType.WAIT,
                                         targetNodeId = null,
                                         x = null,
                                         y = null,
                                         textToType = null,
-                                        waitSeconds = if (LiveMediaProjectionCapturer.isLiveActive.value) 1 else 2,
+                                        waitSeconds = if (isLiveStream) 1 else 2,
                                         memoryNote = null,
                                         reason = outcome.reason,
                                         requiresConfirmation = false
@@ -627,167 +636,204 @@ object AgentCoordinator {
                                 is CarromVisionOutcome.SolvedShot -> {
                                     carromOfflineWaits = 0
                                     usedLocalCarromSolver = true
-                                    val sol = outcome.solution
+                                    carromTurnMemory.ensureTurnStarted(nowCarromMs)
+
                                     val striker = outcome.detectedStriker
                                     val sliderKnob = outcome.detectedSliderKnob
-                                    val sliderGain = currentCarromMem.matchCalibration.sliderGain
 
-                                    // Closed-loop verification of any previous slider move
+                                    // Measure slider gain feedback from previous striker slide (every move refines calibration)
+                                    var observedGainThisStep: Float? = null
                                     val verifyState = pendingSliderVerify
-                                    var microCorrectionAction: PlannedAction? = null
                                     if (verifyState != null && striker != null) {
                                         val actualDelta = striker.center.x - verifyState.preStrikerX
-                                        if (verifyState.correctionAttempts == 0 &&
-                                            kotlin.math.abs(verifyState.commandedDeltaX) > 24f &&
-                                            kotlin.math.abs(actualDelta) > 10f
+                                        if (kotlin.math.abs(verifyState.commandedDeltaX) > 18f &&
+                                            kotlin.math.abs(actualDelta) > 8f
                                         ) {
                                             val observedGain = (actualDelta / verifyState.commandedDeltaX).coerceIn(0.65f, 1.45f)
+                                            observedGainThisStep = observedGain
                                             carromShotMemoryStore?.updateSliderGain(observedGain)
                                         }
-                                        val residualX = verifyState.targetStrikerX - striker.center.x
-                                        if (currentSettings.useClosedLoopSliderVerify &&
-                                            kotlin.math.abs(residualX) > 22f &&
-                                            sliderKnob != null &&
-                                            verifyState.correctionAttempts < 2
-                                        ) {
-                                            val compensatedDelta = (residualX / sliderGain).coerceIn(-220f, 220f)
-                                            val endX = (sliderKnob.x + compensatedDelta)
-                                                .toInt()
-                                                .coerceIn(16, (snapshot.screenWidth - 16).coerceAtLeast(17))
-                                            pendingSliderVerify = PendingSliderVerify(
-                                                targetStrikerX = verifyState.targetStrikerX,
-                                                preStrikerX = striker.center.x,
-                                                commandedDeltaX = (endX - sliderKnob.x.toInt()).toFloat(),
-                                                correctionAttempts = verifyState.correctionAttempts + 1
-                                            )
-                                            justRepositionedCarromSlider = true
-                                            movedStrikerThisTurn = true
-                                            microCorrectionAction = PlannedAction(
-                                                actionType = AgentActionType.DRAG,
-                                                targetNodeId = null,
-                                                x = sliderKnob.x.toInt(),
-                                                y = sliderKnob.y.toInt(),
-                                                endX = endX,
-                                                endY = sliderKnob.y.toInt(),
-                                                durationMs = 180L,
-                                                textToType = null,
-                                                waitSeconds = null,
-                                                memoryNote = "Closed-Loop Slider Micro-Verify #${verifyState.correctionAttempts + 1} (err=${residualX.toInt()}px)",
-                                                reason = "Closed-Loop Slider Verify: adjusting ${residualX.toInt()}px toward target striker X",
-                                                requiresConfirmation = false
-                                            )
-                                        } else {
-                                            pendingSliderVerify = null
-                                        }
-                                    } else {
-                                        pendingSliderVerify = null
                                     }
 
-                                    if (microCorrectionAction != null) {
-                                        microCorrectionAction
+                                    // Record pre-slide / post-slide scan into Turn Memory BEFORE choosing slide or fire
+                                    carromTurnMemory.recordObservation(
+                                        nowMs = nowCarromMs,
+                                        pieces = outcome.boardPieces,
+                                        striker = striker,
+                                        sliderKnob = sliderKnob,
+                                        evaluatedSolution = outcome.solution,
+                                        observedSliderGain = observedGainThisStep
+                                    )
+
+                                    val consensusPieces = carromTurnMemory.buildConsensusPieces(
+                                        latestPieces = outcome.boardPieces,
+                                        coinRadiusPx = outcome.board.coinRadiusPx
+                                    )
+                                    val fusedPiecesWithStriker = if (striker != null) {
+                                        consensusPieces + striker
                                     } else {
-                                        val needsSliderMove = !justRepositionedCarromSlider &&
-                                            sliderKnob != null &&
-                                            striker != null &&
-                                            kotlin.math.abs(sol.strikerPos.x - striker.center.x) > 36f
+                                        consensusPieces
+                                    }
 
-                                        if (needsSliderMove) {
-                                            val rawDelta = sol.strikerPos.x - striker.center.x
-                                            val calibratedDelta = rawDelta / sliderGain
-                                            val targetKnobEndX = (sliderKnob.x + calibratedDelta)
-                                                .toInt()
-                                                .coerceIn(16, (snapshot.screenWidth - 16).coerceAtLeast(17))
-                                            justRepositionedCarromSlider = true
-                                            movedStrikerThisTurn = true
-                                            pendingSliderVerify = PendingSliderVerify(
-                                                targetStrikerX = sol.strikerPos.x,
-                                                preStrikerX = striker.center.x,
-                                                commandedDeltaX = (targetKnobEndX - sliderKnob.x.toInt()).toFloat(),
-                                                correctionAttempts = 0
-                                            )
-                                            PlannedAction(
-                                                actionType = AgentActionType.DRAG,
-                                                targetNodeId = null,
-                                                x = sliderKnob.x.toInt(),
-                                                y = sliderKnob.y.toInt(),
-                                                endX = targetKnobEndX,
-                                                endY = sliderKnob.y.toInt(),
-                                                durationMs = 260L,
-                                                textToType = null,
-                                                waitSeconds = null,
-                                                memoryNote = "Carrom Solver (${myCarromCoinColor.name}): sliding knob (gain=${String.format(java.util.Locale.US, "%.2f", sliderGain)}) for ${sol.reason}",
-                                                reason = "Zero-API Carrom Solver: slide bottom striker knob for ${sol.reason}",
-                                                requiresConfirmation = false
-                                            )
-                                        } else {
-                                            justRepositionedCarromSlider = false
-                                            val didSlideBeforeThisShot = movedStrikerThisTurn
-                                            movedStrikerThisTurn = false
+                                    val turnGain = carromTurnMemory.effectiveTurnSliderGain(
+                                        currentCarromMem.matchCalibration.sliderGain
+                                    )
+                                    val canAffordSlide = sliderKnob != null &&
+                                        striker != null &&
+                                        carromTurnMemory.canAffordAnotherSliderMove(nowCarromMs, isLiveStream)
 
-                                            // Re-lock aim vector strictly onto real detected striker center so we never drag empty wood
-                                            val lockedSol = if (
-                                                striker != null &&
-                                                kotlin.math.abs(sol.strikerPos.x - striker.center.x) > 8f
-                                            ) {
-                                                CarromGeometrySolver.solveBestShot(
-                                                    board = outcome.board,
-                                                    pieces = outcome.boardPieces,
-                                                    myCoinColor = myCarromCoinColor,
-                                                    screenWidth = snapshot.screenWidth,
-                                                    screenHeight = snapshot.screenHeight,
-                                                    existingStriker = striker,
-                                                    canRepositionStriker = false,
-                                                    shotMemory = currentCarromMem,
-                                                    usePhysicsRollout = currentSettings.usePhysicsRollout
-                                                ) ?: sol
-                                            } else {
-                                                sol
-                                            }
+                                    // Evaluate optimal shot across baseline vs in-place Sure Shot using fused turn memory
+                                    val inPlaceSol = if (striker != null) {
+                                        CarromGeometrySolver.solveBestShot(
+                                            board = outcome.board,
+                                            pieces = fusedPiecesWithStriker,
+                                            myCoinColor = myCarromCoinColor,
+                                            screenWidth = snapshot.screenWidth,
+                                            screenHeight = snapshot.screenHeight,
+                                            existingStriker = striker,
+                                            canRepositionStriker = false,
+                                            shotMemory = currentCarromMem,
+                                            usePhysicsRollout = currentSettings.usePhysicsRollout
+                                        )
+                                    } else {
+                                        null
+                                    }
 
-                                            val shootStartX = striker?.center?.x ?: lockedSol.strikerPos.x
-                                            val shootStartY = striker?.center?.y ?: lockedSol.strikerPos.y
-                                            val strikerNormX = ((shootStartX - outcome.board.left) / outcome.board.width).coerceIn(0f, 1f)
+                                    val optimalSlideSol = if (canAffordSlide) {
+                                        CarromGeometrySolver.solveBestShot(
+                                            board = outcome.board,
+                                            pieces = fusedPiecesWithStriker,
+                                            myCoinColor = myCarromCoinColor,
+                                            screenWidth = snapshot.screenWidth,
+                                            screenHeight = snapshot.screenHeight,
+                                            existingStriker = striker,
+                                            canRepositionStriker = true,
+                                            shotMemory = currentCarromMem,
+                                            usePhysicsRollout = currentSettings.usePhysicsRollout
+                                        ) ?: outcome.solution
+                                    } else {
+                                        inPlaceSol ?: outcome.solution
+                                    }
 
-                                            if (outcome.boardPieces.isNotEmpty()) {
-                                                nextPendingCarromShotCandidate = PendingCarromShotRecord(
-                                                    myCoinColor = myCarromCoinColor,
-                                                    targetCoinColor = lockedSol.targetCoin.color,
-                                                    pocketIndex = lockedSol.pocketIndex,
-                                                    cutAngleDeg = lockedSol.cutAngleDeg,
-                                                    strikerNormalizedX = strikerNormX,
-                                                    powerStyle = lockedSol.powerStyle,
-                                                    movedStrikerWithSlider = didSlideBeforeThisShot,
-                                                    isBankShot = lockedSol.isBankShot,
-                                                    isComboShot = lockedSol.isComboShot,
-                                                    isBreakShot = lockedSol.isBreakShot,
-                                                    preCounts = CarromShotMemoryStore.countBoardPieces(outcome.boardPieces, myCarromCoinColor)
-                                                )
-                                            }
+                                    // Unlimited slider adjustments within the 9-second turn timer until we lock onto a Sure Shot
+                                    val desiredTargetX = if (verifyState != null &&
+                                        currentSettings.useClosedLoopSliderVerify &&
+                                        kotlin.math.abs(verifyState.targetStrikerX - (striker?.center?.x ?: 0f)) > 22f &&
+                                        !optimalSlideSol.isSureShot
+                                    ) {
+                                        verifyState.targetStrikerX
+                                    } else {
+                                        optimalSlideSol.strikerPos.x
+                                    }
 
-                                            val dx = lockedSol.dragEnd.x - lockedSol.strikerPos.x
-                                            val dy = lockedSol.dragEnd.y - lockedSol.strikerPos.y
-                                            val shootEndX = (shootStartX + dx).toInt().coerceIn(16, (snapshot.screenWidth - 16).coerceAtLeast(17))
-                                            val shootEndY = (shootStartY + dy).toInt().coerceIn(16, (snapshot.screenHeight - 16).coerceAtLeast(17))
-                                            PlannedAction(
-                                                actionType = AgentActionType.DRAG,
-                                                targetNodeId = null,
-                                                x = shootStartX.toInt(),
-                                                y = shootStartY.toInt(),
-                                                endX = shootEndX,
-                                                endY = shootEndY,
-                                                durationMs = 560L,
-                                                textToType = null,
-                                                waitSeconds = null,
-                                                memoryNote = "Carrom Solver (${myCarromCoinColor.name}): ${lockedSol.reason}",
-                                                reason = "Zero-API Carrom Solver: ${lockedSol.reason} (conf=${(lockedSol.confidenceScore * 100).toInt()}%)",
-                                                requiresConfirmation = false
+                                    val alreadyHasSureInPlace = inPlaceSol != null &&
+                                        inPlaceSol.isSureShot &&
+                                        (!optimalSlideSol.isSureShot || inPlaceSol.confidenceScore >= optimalSlideSol.confidenceScore - 0.06f)
+
+                                    val needsSliderAdjustment = canAffordSlide &&
+                                        striker != null &&
+                                        sliderKnob != null &&
+                                        !alreadyHasSureInPlace &&
+                                        kotlin.math.abs(desiredTargetX - striker.center.x) > 22f &&
+                                        !carromTurnMemory.isSliderStalledOrOscillating(desiredTargetX, striker.center.x)
+
+                                    if (needsSliderAdjustment) {
+                                        val rawDelta = desiredTargetX - striker!!.center.x
+                                        val calibratedDelta = (rawDelta / turnGain).coerceIn(-380f, 380f)
+                                        val targetKnobEndX = (sliderKnob!!.x + calibratedDelta)
+                                            .toInt()
+                                            .coerceIn(16, (snapshot.screenWidth - 16).coerceAtLeast(17))
+
+                                        didSlideCarromThisStep = true
+                                        movedStrikerThisTurn = true
+                                        carromTurnMemory.recordSliderMoveDispatched(striker.center.x)
+                                        pendingSliderVerify = PendingSliderVerify(
+                                            targetStrikerX = desiredTargetX,
+                                            preStrikerX = striker.center.x,
+                                            commandedDeltaX = (targetKnobEndX - sliderKnob.x.toInt()).toFloat(),
+                                            correctionAttempts = (verifyState?.correctionAttempts ?: 0) + 1
+                                        )
+                                        val remSec = carromTurnMemory.remainingMs(nowCarromMs) / 1000f
+                                        PlannedAction(
+                                            actionType = AgentActionType.DRAG,
+                                            targetNodeId = null,
+                                            x = sliderKnob.x.toInt(),
+                                            y = sliderKnob.y.toInt(),
+                                            endX = targetKnobEndX,
+                                            endY = sliderKnob.y.toInt(),
+                                            durationMs = if (kotlin.math.abs(calibratedDelta) < 120f) 160L else 210L,
+                                            textToType = null,
+                                            waitSeconds = null,
+                                            memoryNote = "Turn Memory (${carromTurnMemory.scanCount} scans, rem=${String.format(java.util.Locale.US, "%.1f", remSec)}s): sliding #${carromTurnMemory.sliderMovesThisTurn} (gain=${String.format(java.util.Locale.US, "%.2f", turnGain)})",
+                                            reason = "Carrom Turn Scan #${carromTurnMemory.scanCount}: slide striker #${carromTurnMemory.sliderMovesThisTurn} (${String.format(java.util.Locale.US, "%.1f", remSec)}s left)",
+                                            requiresConfirmation = false
+                                        )
+                                    } else {
+                                        // Combine ALL turn scan memory + live striker + physics rollout & FIRE immediately within 9s!
+                                        pendingSliderVerify = null
+                                        val didSlideBeforeThisShot = movedStrikerThisTurn
+                                        movedStrikerThisTurn = false
+
+                                        val finalSol = inPlaceSol ?: carromTurnMemory.solveCombinedFinalShot(
+                                            board = outcome.board,
+                                            latestPieces = outcome.boardPieces,
+                                            striker = striker,
+                                            myCoinColor = myCarromCoinColor,
+                                            screenWidth = snapshot.screenWidth,
+                                            screenHeight = snapshot.screenHeight,
+                                            shotMemory = currentCarromMem,
+                                            usePhysicsRollout = currentSettings.usePhysicsRollout,
+                                            fallbackSolution = outcome.solution
+                                        )
+
+                                        val telemetry = carromTurnMemory.formatTurnTelemetry(nowCarromMs, finalSol)
+                                        carromTurnMemory.resetTurn()
+
+                                        val shootStartX = striker?.center?.x ?: finalSol.strikerPos.x
+                                        val shootStartY = striker?.center?.y ?: finalSol.strikerPos.y
+                                        val strikerNormX = ((shootStartX - outcome.board.left) / outcome.board.width).coerceIn(0f, 1f)
+
+                                        if (consensusPieces.isNotEmpty() || outcome.boardPieces.isNotEmpty()) {
+                                            val countSource = consensusPieces.ifEmpty { outcome.boardPieces }
+                                            nextPendingCarromShotCandidate = PendingCarromShotRecord(
+                                                myCoinColor = myCarromCoinColor,
+                                                targetCoinColor = finalSol.targetCoin.color,
+                                                pocketIndex = finalSol.pocketIndex,
+                                                cutAngleDeg = finalSol.cutAngleDeg,
+                                                strikerNormalizedX = strikerNormX,
+                                                powerStyle = finalSol.powerStyle,
+                                                movedStrikerWithSlider = didSlideBeforeThisShot,
+                                                isBankShot = finalSol.isBankShot,
+                                                isComboShot = finalSol.isComboShot,
+                                                isBreakShot = finalSol.isBreakShot,
+                                                preCounts = CarromShotMemoryStore.countBoardPieces(countSource, myCarromCoinColor)
                                             )
                                         }
+
+                                        val dx = finalSol.dragEnd.x - finalSol.strikerPos.x
+                                        val dy = finalSol.dragEnd.y - finalSol.strikerPos.y
+                                        val shootEndX = (shootStartX + dx).toInt().coerceIn(16, (snapshot.screenWidth - 16).coerceAtLeast(17))
+                                        val shootEndY = (shootStartY + dy).toInt().coerceIn(16, (snapshot.screenHeight - 16).coerceAtLeast(17))
+                                        PlannedAction(
+                                            actionType = AgentActionType.DRAG,
+                                            targetNodeId = null,
+                                            x = shootStartX.toInt(),
+                                            y = shootStartY.toInt(),
+                                            endX = shootEndX,
+                                            endY = shootEndY,
+                                            durationMs = 520L,
+                                            textToType = null,
+                                            waitSeconds = null,
+                                            memoryNote = "Carrom (${myCarromCoinColor.name}) $telemetry: ${finalSol.reason}",
+                                            reason = "Zero-API Carrom $telemetry: ${finalSol.reason} (conf=${(finalSol.confidenceScore * 100).toInt()}%)",
+                                            requiresConfirmation = false
+                                        )
                                     }
                                 }
                                 is CarromVisionOutcome.NeedsAiVision -> {
                                     carromOfflineWaits = 0
-                                    justRepositionedCarromSlider = false
+                                    pendingSliderVerify = null
+                                    carromTurnMemory.resetTurn()
                                     lastOutcomeHint = "[Carrom Local Vision: ${outcome.diagnostic}] $lastOutcomeHint"
                                     if (outcome.boardPieces.isNotEmpty()) {
                                         aiPreCarromCounts = CarromShotMemoryStore.countBoardPieces(outcome.boardPieces, myCarromCoinColor)
@@ -796,6 +842,7 @@ object AgentCoordinator {
                                 }
                             }
                         } else {
+                            carromTurnMemory.resetTurn()
                             if (isCarromContext && snapshot.screenshot == null) {
                                 lastOutcomeHint = "[CARROM SCREENSHOT MISSING (${snapshot.captureNote}) — Turn ON Multimodal Vision Screenshot in Settings and ensure game allows screen capture.] $lastOutcomeHint"
                             }
@@ -1045,7 +1092,7 @@ object AgentCoordinator {
                         continue
                     }
 
-                    if (SafetyGuard.isStuckLoop(trace, plannedAction, targetSummary)) {
+                    if (!usedLocalCarromSolver && SafetyGuard.isStuckLoop(trace, plannedAction, targetSummary)) {
                         _uiState.value = AgentUiState.Error(
                             goal = goal,
                             message = "Stopped to prevent an infinite loop repeating: $targetSummary",
@@ -1232,8 +1279,9 @@ object AgentCoordinator {
                         trace = trace.toList()
                     )
                     val effectiveDelayMs = when {
-                        LiveMediaProjectionCapturer.isLiveActive.value && justRepositionedCarromSlider -> 150L
-                        LiveMediaProjectionCapturer.isLiveActive.value && usedLocalCarromSolver -> 480L
+                        usedLocalCarromSolver && didSlideCarromThisStep && LiveMediaProjectionCapturer.isLiveActive.value -> 110L
+                        usedLocalCarromSolver && didSlideCarromThisStep -> 140L
+                        LiveMediaProjectionCapturer.isLiveActive.value && usedLocalCarromSolver -> 460L
                         else -> currentSettings.stepDelayMs
                     }
                     delay(effectiveDelayMs)

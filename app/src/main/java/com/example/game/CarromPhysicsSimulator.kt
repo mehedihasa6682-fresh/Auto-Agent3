@@ -32,6 +32,8 @@ data class RolloutVerificationResult(
     val predictedQueenPotted: Boolean,
     val predictedScratchFoul: Boolean,
     val predictedOpponentOnlyFoul: Boolean,
+    val predictedKissBlock: Boolean,
+    val isSureShot: Boolean,
     val predictedStrikerPocketIndex: Int?,
     val physicsCompositeScore: Float,
     val rolloutsRun: Int,
@@ -76,7 +78,10 @@ object CarromPhysicsSimulator {
         val strikerScratched: Boolean,
         val strikerPocketIndex: Int?,
         val minTargetToPocketDist: Float,
-        val jawClearenceScore: Float
+        val jawClearenceScore: Float,
+        val firstStrikerHitIsTarget: Boolean,
+        val targetDeflectedByNonTarget: Boolean,
+        val kissedObstacleCount: Int
     )
 
     fun verifyAndRefineCandidates(
@@ -92,7 +97,7 @@ object CarromPhysicsSimulator {
         val startNs = System.nanoTime()
         val topCandidates = candidates
             .sortedByDescending { it.staticScore }
-            .take(5)
+            .take(8)
 
         val frictionScale = matchCalibration?.frictionScale ?: 1.0f
         val jawSafetyBuffer = matchCalibration?.pocketJawSafetyBuffer ?: 0f
@@ -210,10 +215,20 @@ object CarromPhysicsSimulator {
                 chosenOutcome.pottedMyCoins == 0 &&
                 !chosenOutcome.pottedQueen
 
+            val predictedKissBlock = (!candidate.isBreakShot && !candidate.isComboShot && !chosenOutcome.firstStrikerHitIsTarget) ||
+                (chosenOutcome.targetDeflectedByNonTarget && chosenOutcome.pottedMyCoins == 0 && !chosenOutcome.pottedQueen)
+
+            val isSureShot = (chosenOutcome.pottedMyCoins > 0 || chosenOutcome.pottedQueen) &&
+                !chosenOutcome.strikerScratched &&
+                !opponentOnlyFoul &&
+                !predictedKissBlock &&
+                robustness >= 0.55f
+
             val compositeScore = (
                 bestLocalScore * 0.72f +
                     candidate.staticScore * 0.28f +
-                    robustness * 0.16f -
+                    robustness * 0.16f +
+                    (if (isSureShot) 0.10f else 0f) -
                     heatmapRisk * 0.22f
                 ).coerceIn(0.02f, 1.0f)
 
@@ -226,6 +241,8 @@ object CarromPhysicsSimulator {
                 predictedQueenPotted = chosenOutcome.pottedQueen,
                 predictedScratchFoul = chosenOutcome.strikerScratched,
                 predictedOpponentOnlyFoul = opponentOnlyFoul,
+                predictedKissBlock = predictedKissBlock,
+                isSureShot = isSureShot,
                 predictedStrikerPocketIndex = chosenOutcome.strikerPocketIndex,
                 physicsCompositeScore = compositeScore,
                 rolloutsRun = totalRollouts,
@@ -301,6 +318,10 @@ object CarromPhysicsSimulator {
         val dtSub = 1.0f / SUBSTEPS_PER_STEP
         var minTargetPocketDist = Float.MAX_VALUE
         var bestJawClearance = 0f
+        var strikerHasCollided = false
+        var firstStrikerHitIsTarget = true
+        var targetDeflectedByNonTarget = false
+        var kissedObstacleCount = 0
 
         for (step in 0 until MAX_SIM_STEPS) {
             var anyMoving = false
@@ -409,6 +430,24 @@ object CarromPhysicsSimulator {
                         a.vy -= iy * invMassA
                         b.vx += ix * invMassB
                         b.vy += iy * invMassB
+
+                        // Track kiss / unintended obstacle collisions
+                        val involvesStriker = (a === strikerBody || b === strikerBody)
+                        val otherFromStriker = if (a === strikerBody) b else a
+                        if (involvesStriker) {
+                            if (!strikerHasCollided) {
+                                strikerHasCollided = true
+                                if (targetBody != null && otherFromStriker !== targetBody) {
+                                    firstStrikerHitIsTarget = false
+                                    kissedObstacleCount++
+                                }
+                            } else if (targetBody != null && otherFromStriker !== targetBody) {
+                                kissedObstacleCount++
+                            }
+                        } else if (targetBody != null && (a === targetBody || b === targetBody)) {
+                            targetDeflectedByNonTarget = true
+                            kissedObstacleCount++
+                        }
                     }
                 }
             }
@@ -443,7 +482,10 @@ object CarromPhysicsSimulator {
             strikerScratched = strikerBody.pocketed,
             strikerPocketIndex = if (strikerBody.pocketed) strikerBody.pocketedInIndex else null,
             minTargetToPocketDist = minTargetPocketDist,
-            jawClearenceScore = bestJawClearance
+            jawClearenceScore = bestJawClearance,
+            firstStrikerHitIsTarget = firstStrikerHitIsTarget,
+            targetDeflectedByNonTarget = targetDeflectedByNonTarget,
+            kissedObstacleCount = kissedObstacleCount
         )
     }
 
@@ -454,11 +496,11 @@ object CarromPhysicsSimulator {
         shotMemory: CarromMemoryData?
     ): Float {
         if (outcome.strikerScratched) {
-            return -0.95f
+            return -0.98f
         }
         val oppOnlyFoul = outcome.pottedOpponentCoins > 0 && outcome.pottedMyCoins == 0 && !outcome.pottedQueen
         if (oppOnlyFoul) {
-            return -0.60f
+            return -0.68f
         }
 
         var score = 0.25f
@@ -472,14 +514,27 @@ object CarromPhysicsSimulator {
             // Break shot doesn't guarantee a pot, so reward avoiding fouls and disturbing target
             score += 0.24f
         } else {
-            // Missed pot: reward getting closer to pocket only slightly so potted shots always win
-            val prox = (1f - (outcome.minTargetToPocketDist / 300f).coerceIn(0f, 1f)) * 0.15f
-            score += prox - 0.12f
+            // Missed pot (often due to kiss/deflection): strong penalty so clean pots always win
+            val prox = (1f - (outcome.minTargetToPocketDist / 300f).coerceIn(0f, 1f)) * 0.12f
+            score += prox - if (outcome.targetDeflectedByNonTarget) 0.38f else 0.16f
+        }
+
+        if (!candidate.isBreakShot && !candidate.isComboShot && !outcome.firstStrikerHitIsTarget) {
+            // Striker clipped another coin before hitting intended target -> kiss-miss risk
+            score -= 0.36f
+        } else if (!candidate.isBreakShot && outcome.targetDeflectedByNonTarget && outcome.pottedMyCoins == 0) {
+            score -= 0.22f
         }
 
         if (outcome.pottedOpponentCoins > 0 && outcome.pottedMyCoins > 0) {
-            // Potted both ours and opponent's — minor penalty compared to pure clean pot
             score -= 0.08f
+        } else if ((outcome.pottedMyCoins > 0 || outcome.pottedQueen) &&
+            outcome.firstStrikerHitIsTarget &&
+            !outcome.targetDeflectedByNonTarget &&
+            outcome.pottedOpponentCoins == 0
+        ) {
+            // Clean zero-kiss zero-foul pot bonus
+            score += 0.16f
         }
 
         // Slight preference for smaller deviation from analytical geometry

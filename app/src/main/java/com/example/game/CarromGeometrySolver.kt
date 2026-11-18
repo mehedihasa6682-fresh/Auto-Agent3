@@ -64,6 +64,7 @@ data class CarromShotSolution(
     val isBankShot: Boolean,
     val isComboShot: Boolean = false,
     val isBreakShot: Boolean = false,
+    val isSureShot: Boolean = false,
     val powerStyle: CarromPowerStyle = CarromPowerStyle.MEDIUM,
     val confidenceScore: Float,
     val reason: String
@@ -244,6 +245,7 @@ object CarromGeometrySolver {
             }
         }
 
+        var directRejectedByPhysics = false
         if (usePhysicsRollout && directPool.isNotEmpty() && (bestDirect == null || bestDirect.confidenceScore >= 0.52f)) {
             val verified = refineWithPhysicsRollout(
                 board = board,
@@ -257,9 +259,12 @@ object CarromGeometrySolver {
             if (verified != null && (verified.confidenceScore >= 0.56f || bestDirect == null)) {
                 return verified
             }
+            if (verified == null) {
+                directRejectedByPhysics = true
+            }
         }
 
-        if (bestDirect != null && bestDirect.confidenceScore >= 0.58f) {
+        if (!directRejectedByPhysics && bestDirect != null && bestDirect.confidenceScore >= 0.58f) {
             return bestDirect
         }
 
@@ -370,8 +375,10 @@ object CarromGeometrySolver {
             winner.isBreakShot -> "Break"
             winner.isComboShot -> "Combo"
             winner.isBankShot -> "1-Rail Bank"
+            sim.isSureShot -> "SURE"
             else -> "2D-Sim"
         }
+        val kissTag = if (sim.predictedKissBlock) ", kiss-risk" else ", kiss-free"
         val pocketLabel = CarromMemoryData.pocketName(winner.pocketIndex)
         val robPct = (sim.robustnessScore * 100).toInt()
         return CarromShotSolution(
@@ -385,9 +392,14 @@ object CarromGeometrySolver {
             isBankShot = winner.isBankShot,
             isComboShot = winner.isComboShot,
             isBreakShot = winner.isBreakShot,
+            isSureShot = sim.isSureShot,
             powerStyle = powerStyle,
-            confidenceScore = sim.physicsCompositeScore,
-            reason = "$kindTag ${winner.targetCoin.color.name} (${powerStyle.label}) cut=${winner.cutAngleDeg.toInt()}° -> $pocketLabel [Sim ${sim.rolloutsRun}x/${sim.elapsedMs}ms, rob=${robPct}%]"
+            confidenceScore = if (sim.predictedKissBlock) {
+                (sim.physicsCompositeScore * 0.78f).coerceAtLeast(0.10f)
+            } else {
+                sim.physicsCompositeScore
+            },
+            reason = "$kindTag ${winner.targetCoin.color.name} (${powerStyle.label}) cut=${winner.cutAngleDeg.toInt()}° -> $pocketLabel [Sim ${sim.rolloutsRun}x/${sim.elapsedMs}ms, rob=${robPct}%$kissTag]"
         )
     }
 
