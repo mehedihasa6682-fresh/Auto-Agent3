@@ -689,4 +689,135 @@ class ExampleRobolectricTest {
         )
         bm.recycle()
     }
+
+    @Test
+    fun `physics simulator counts collision-assisted pot as Sure Shot while rejecting collision-miss and ranking up to 7 baseline probes`() {
+        val board = com.example.game.CarromBoardLayout(
+            left = 60f,
+            top = 400f,
+            right = 1020f,
+            bottom = 1360f,
+            pockets = listOf(
+                com.example.game.Point2D(120f, 460f),
+                com.example.game.Point2D(960f, 460f),
+                com.example.game.Point2D(120f, 1300f),
+                com.example.game.Point2D(960f, 1300f)
+            ),
+            baselineY = 1210f,
+            coinRadiusPx = 28f,
+            strikerRadiusPx = 35f,
+            pocketRadiusPx = 50f
+        )
+
+        // Setup 1: Target white coin in front of Top-Left pocket, with a helper white coin right behind it
+        // Hitting the helper coin drives the target white coin into Top-Left pocket (collision-assisted pot!)
+        val targetCoin = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.WHITE,
+            center = com.example.game.Point2D(205f, 545f),
+            radiusPx = 28f
+        )
+        val helperCoin = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.WHITE,
+            center = com.example.game.Point2D(248f, 588f),
+            radiusPx = 28f
+        )
+        val striker = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.STRIKER,
+            center = com.example.game.Point2D(869f, 1210f),
+            radiusPx = 35f
+        )
+        val extraCoin = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.WHITE,
+            center = com.example.game.Point2D(420f, 700f),
+            radiusPx = 28f
+        )
+        val pieces = listOf(targetCoin, helperCoin, extraCoin, striker)
+
+        val dirToPocket = (board.pockets[0] - targetCoin.center).normalized()
+        val ghostBehindHelper = helperCoin.center - dirToPocket * (28f + 35f)
+        val dirToGhost = (ghostBehindHelper - striker.center).normalized()
+        val collisionCandidate = com.example.game.RolloutCandidate(
+            strikerPos = striker.center,
+            baseDir = dirToGhost,
+            ghostBall = ghostBehindHelper,
+            targetCoin = targetCoin,
+            targetPocket = board.pockets[0],
+            pocketIndex = 0,
+            cutAngleDeg = 0f,
+            isBankShot = false,
+            isComboShot = true,
+            isBreakShot = false,
+            basePullMultiplier = 1.26f,
+            staticScore = 0.72f,
+            totalDistance = 920f
+        )
+
+        val simRes = com.example.game.CarromPhysicsSimulator.verifyAndRefineCandidates(
+            board = board,
+            pieces = pieces,
+            myCoinColor = com.example.game.CoinColor.WHITE,
+            candidates = listOf(collisionCandidate),
+            shotMemory = null,
+            matchCalibration = null
+        )
+        org.junit.Assert.assertNotNull(simRes)
+        org.junit.Assert.assertTrue(
+            "Expected collision-assisted clean pot to qualify as Sure Shot, got ${simRes!!.second}",
+            simRes.second.isSureShot && simRes.second.isCollisionAssistedSureShot
+        )
+
+        // Setup 2: Blocked shot with an opponent black coin deflecting the white coin away from pocket -> rejected
+        val blockerBlack = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.BLACK,
+            center = com.example.game.Point2D(175f, 490f),
+            radiusPx = 28f
+        )
+        val missSimRes = com.example.game.CarromPhysicsSimulator.verifyAndRefineCandidates(
+            board = board,
+            pieces = listOf(targetCoin, blockerBlack, striker),
+            myCoinColor = com.example.game.CoinColor.WHITE,
+            candidates = listOf(
+                com.example.game.RolloutCandidate(
+                    strikerPos = striker.center,
+                    baseDir = (targetCoin.center - striker.center).normalized(),
+                    ghostBall = targetCoin.center,
+                    targetCoin = targetCoin,
+                    targetPocket = board.pockets[0],
+                    pocketIndex = 0,
+                    cutAngleDeg = 12f,
+                    isBankShot = false,
+                    isComboShot = false,
+                    isBreakShot = false,
+                    basePullMultiplier = 1.0f,
+                    staticScore = 0.70f,
+                    totalDistance = 740f
+                )
+            ),
+            shotMemory = null,
+            matchCalibration = null
+        )
+        org.junit.Assert.assertNotNull(missSimRes)
+        org.junit.Assert.assertFalse(
+            "Expected blocked collision miss NOT to be marked as Sure Shot",
+            missSimRes!!.second.isSureShot
+        )
+
+        // Setup 3: Ranked top-7 probe queue + 8.5s cutoff enforcement in CarromTurnMemory
+        val probeQueue = com.example.game.CarromGeometrySolver.buildRankedBaselineProbeQueue(
+            board = board,
+            pieces = pieces,
+            myCoinColor = com.example.game.CoinColor.WHITE,
+            existingStriker = striker,
+            shotMemory = null,
+            maxProbes = 7
+        )
+        org.junit.Assert.assertTrue("Expected ranked baseline probes <= 7 and non-empty", probeQueue.size in 1..7)
+
+        val turnMemory = com.example.game.CarromTurnMemory()
+        turnMemory.ensureTurnStarted(1_000L)
+        turnMemory.initializeProbeQueueIfNeeded(probeQueue)
+        turnMemory.markSpotRejected(striker.center.x, "collision-miss")
+        org.junit.Assert.assertTrue(turnMemory.canAffordAnotherSliderMove(4_000L, isLiveStreamActive = true))
+        org.junit.Assert.assertFalse(turnMemory.canAffordAnotherSliderMove(9_400L, isLiveStreamActive = true))
+    }
 }

@@ -3,22 +3,45 @@ package com.example.game
 import kotlin.math.abs
 import kotlin.math.hypot
 
+enum class TurnProbeStage(val badge: String) {
+    PRE_SCAN("PRE-SCAN"),
+    PROBING_SLIDER("PROBING"),
+    LOCKED_SURE_SHOT("SURE SHOT"),
+    CAROM_SURE_SHOT("CAROM SURE"),
+    FALLBACK_FIRE("8.5s BREAK/POT")
+}
+
+data class CarromTurnHudState(
+    val isActive: Boolean = false,
+    val elapsedSec: Float = 0f,
+    val maxSec: Float = 9.0f,
+    val probeNumber: Int = 0,
+    val maxProbes: Int = 7,
+    val scanCount: Int = 0,
+    val rejectedCount: Int = 0,
+    val stage: TurnProbeStage = TurnProbeStage.PRE_SCAN,
+    val detail: String = ""
+)
+
 /**
- * Per-Turn Working Memory & 9-Second Turn Shot Clock for Carrom.
+ * Per-Turn Working Memory, Ranked 7-Spot Striker Probe Queue & 9-Second Turn Shot Clock.
  *
- * Accumulates every board observation captured BEFORE and AFTER each striker slider move
- * in the current turn, fuses non-striker pieces across scans into a stabilized consensus map,
- * allows unlimited slider moves as long as the 9-second turn shot clock permits, and finally
- * fuses all turn observations + physics rollout + match calibration to fire a verified Sure Shot
- * strictly within 9 seconds.
+ * 1. Scans the whole board before moving and stabilizes piece coordinates across frames.
+ * 2. Holds up to 7 physics-ranked baseline X candidate positions.
+ * 3. Rejects colliding spots that miss or foul and slides to the next candidate spot (up to 7 moves).
+ * 4. Accepts collision-assisted shots that STILL cleanly sink our coin/Queen without foul as Sure Shots.
+ * 5. Enforces an 8.35s–8.5s fallback deadline so the safest break/pot fires before the 9.0s turn clock expires.
  */
 class CarromTurnMemory {
 
     companion object {
         const val MAX_TURN_BUDGET_MS = 9_000L
+        const val FALLBACK_FIRE_ELAPSED_MS = 8_350L
+        const val MAX_BASELINE_PROBES = 7
         private const val LIVE_FIRE_RESERVE_MS = 1_250L
         private const val A11Y_FIRE_RESERVE_MS = 2_350L
-        private const val MAX_STORED_SCANS = 18
+        private const val MAX_STORED_SCANS = 20
+        private const val SPOT_MATCH_TOLERANCE_PX = 20f
     }
 
     data class TurnScanFrame(
@@ -34,12 +57,18 @@ class CarromTurnMemory {
     private val scanFrames = mutableListOf<TurnScanFrame>()
     private val visitedStrikerXs = mutableListOf<Float>()
     private val localSliderGains = mutableListOf<Float>()
+    private val rankedProbeQueue = mutableListOf<RankedBaselineSpot>()
+    private val rejectedSpots = mutableListOf<Pair<Float, String>>()
+    private var probeQueueInitialized = false
     private var _sliderMovesThisTurn: Int = 0
     private var bestEvaluatedThisTurn: CarromShotSolution? = null
 
     val sliderMovesThisTurn: Int get() = _sliderMovesThisTurn
     val scanCount: Int get() = scanFrames.size
     val isTurnActive: Boolean get() = turnStartMs > 0L
+    val isProbeQueueInitialized: Boolean get() = probeQueueInitialized
+    val rejectedProbeCount: Int get() = rejectedSpots.size
+    val totalPlannedProbes: Int get() = rankedProbeQueue.size.coerceAtMost(MAX_BASELINE_PROBES)
 
     fun ensureTurnStarted(nowMs: Long = System.currentTimeMillis()) {
         if (turnStartMs == 0L) {
@@ -58,17 +87,59 @@ class CarromTurnMemory {
     }
 
     /**
-     * Returns true if there is enough time left in the 9-second turn window to perform
-     * another striker slider drag, settle/read the next frame, and still execute the shot drag
-     * cleanly before 9,000ms elapses.
+     * True when there is enough room inside the 9.0s turn window to slide, verify the next frame,
+     * and still fire before the 8.5s fallback cutoff.
      */
     fun canAffordAnotherSliderMove(
         nowMs: Long = System.currentTimeMillis(),
         isLiveStreamActive: Boolean
     ): Boolean {
         ensureTurnStarted(nowMs)
+        val elapsed = elapsedMs(nowMs)
+        if (elapsed >= FALLBACK_FIRE_ELAPSED_MS) return false
         val reserve = if (isLiveStreamActive) LIVE_FIRE_RESERVE_MS else A11Y_FIRE_RESERVE_MS
         return remainingMs(nowMs) > reserve
+    }
+
+    fun shouldTriggerDeadlineFallback(
+        nowMs: Long = System.currentTimeMillis(),
+        isLiveStreamActive: Boolean
+    ): Boolean {
+        return !canAffordAnotherSliderMove(nowMs, isLiveStreamActive)
+    }
+
+    fun initializeProbeQueueIfNeeded(spots: List<RankedBaselineSpot>) {
+        if (probeQueueInitialized) return
+        probeQueueInitialized = true
+        rankedProbeQueue.clear()
+        rankedProbeQueue.addAll(spots.take(MAX_BASELINE_PROBES))
+    }
+
+    fun markSpotRejected(strikerX: Float, reason: String) {
+        if (rejectedSpots.none { abs(it.first - strikerX) <= SPOT_MATCH_TOLERANCE_PX }) {
+            rejectedSpots.add(strikerX to reason)
+        }
+    }
+
+    fun nextUntestedProbeSpot(
+        currentStrikerX: Float?,
+        tolerancePx: Float = SPOT_MATCH_TOLERANCE_PX
+    ): RankedBaselineSpot? {
+        if (_sliderMovesThisTurn >= MAX_BASELINE_PROBES) return null
+        for (spot in rankedProbeQueue) {
+            val nearCurrent = currentStrikerX != null && abs(spot.strikerX - currentStrikerX) <= tolerancePx
+            val alreadyRejected = rejectedSpots.any { abs(it.first - spot.strikerX) <= tolerancePx }
+            val alreadyVisited = visitedStrikerXs.any { abs(it - spot.strikerX) <= tolerancePx }
+            if (!nearCurrent && !alreadyRejected && !alreadyVisited) {
+                return spot
+            }
+        }
+        return null
+    }
+
+    fun hasMoreProbesRemaining(currentStrikerX: Float?): Boolean {
+        return _sliderMovesThisTurn < MAX_BASELINE_PROBES &&
+            nextUntestedProbeSpot(currentStrikerX) != null
     }
 
     fun recordSliderMoveDispatched(preStrikerX: Float?) {
@@ -107,7 +178,7 @@ class CarromTurnMemory {
         if (striker != null) {
             visitedStrikerXs.add(striker.center.x)
         }
-        if (evaluatedSolution != null) {
+        if (evaluatedSolution != null && !evaluatedSolution.rejectedDueToCollisionOrFoul) {
             val prev = bestEvaluatedThisTurn
             if (prev == null ||
                 (evaluatedSolution.isSureShot && !prev.isSureShot) ||
@@ -118,10 +189,6 @@ class CarromTurnMemory {
         }
     }
 
-    /**
-     * Detects when the slider has hit the baseline stop or started oscillating between the
-     * same X positions so the agent stops sliding and fires right away instead of burning the clock.
-     */
     fun isSliderStalledOrOscillating(targetStrikerX: Float, currentStrikerX: Float): Boolean {
         if (visitedStrikerXs.size < 2) return false
         val lastPrev = visitedStrikerXs[visitedStrikerXs.size - 2]
@@ -130,7 +197,6 @@ class CarromTurnMemory {
         if (_sliderMovesThisTurn >= 2 && movedFromPrev < 6f && stillFarFromTarget) {
             return true
         }
-        // Check 3-point X oscillation (e.g. X1 -> X2 -> X1)
         if (visitedStrikerXs.size >= 4) {
             val xA = visitedStrikerXs[visitedStrikerXs.size - 1]
             val xC = visitedStrikerXs[visitedStrikerXs.size - 3]
@@ -148,12 +214,6 @@ class CarromTurnMemory {
             .coerceIn(0.65f, 1.45f)
     }
 
-    /**
-     * Fuses all pre-slide and post-slide coin/Queen observations in the current turn into a
-     * jitter-free consensus board piece list. Always anchors on [latestPieces] while averaging
-     * stabilized coordinates from matching pieces across earlier turn scans and preserving
-     * any real coin briefly missed by single-frame glare/occlusion.
-     */
     fun buildConsensusPieces(
         latestPieces: List<CarromPiece>,
         coinRadiusPx: Float = 28f
@@ -164,7 +224,6 @@ class CarromTurnMemory {
         val matchThreshold = (coinRadiusPx * 1.2f).coerceAtLeast(20f)
         val fused = ArrayList<CarromPiece>(latestNonStriker.size + 4)
 
-        // 1. Stabilize each latest detected coin with matching detections across recent turn frames
         for (piece in latestNonStriker) {
             var sumX = piece.center.x * 1.4f
             var sumY = piece.center.y * 1.4f
@@ -184,17 +243,11 @@ class CarromTurnMemory {
                     weight += 1f
                 }
             }
-            fused.add(
-                piece.copy(
-                    center = Point2D(sumX / weight, sumY / weight)
-                )
-            )
+            fused.add(piece.copy(center = Point2D(sumX / weight, sumY / weight)))
         }
 
-        // 2. Recover any persistent coin spotted in >= 2 prior scans this turn that dropped out in latest frame
         if (scanFrames.size >= 3) {
             val candidatePool = scanFrames.dropLast(1).flatMap { it.pieces }
-            val minConsensusFrames = 2
             val visitedExtra = mutableListOf<Point2D>()
 
             for (cand in candidatePool) {
@@ -220,7 +273,7 @@ class CarromTurnMemory {
                         sumY += m.center.y
                     }
                 }
-                if (occurrences >= minConsensusFrames) {
+                if (occurrences >= 2) {
                     val center = Point2D(sumX / occurrences, sumY / occurrences)
                     visitedExtra.add(center)
                     fused.add(CarromPiece(cand.color, center, cand.radiusPx))
@@ -232,8 +285,8 @@ class CarromTurnMemory {
     }
 
     /**
-     * Combines all accumulated turn scan memory with the current striker position,
-     * match calibration, scratch heatmap, and 2D physics rollout to choose the final shot.
+     * Deadline fallback (when all <=7 probes fail or clock hits ~8.35s):
+     * combines all accumulated Turn Memory frames and fires the safest foul-free pot or cluster break.
      */
     fun solveCombinedFinalShot(
         board: CarromBoardLayout,
@@ -250,14 +303,13 @@ class CarromTurnMemory {
         val combinedPieces = if (striker != null) consensusPieces + striker else consensusPieces
 
         return if (striker != null) {
-            CarromGeometrySolver.solveBestShot(
+            CarromGeometrySolver.solveSafestBreakOrPotShot(
                 board = board,
                 pieces = combinedPieces,
                 myCoinColor = myCoinColor,
                 screenWidth = screenWidth,
                 screenHeight = screenHeight,
                 existingStriker = striker,
-                canRepositionStriker = false,
                 shotMemory = shotMemory,
                 usePhysicsRollout = usePhysicsRollout
             ) ?: fallbackSolution
@@ -266,15 +318,39 @@ class CarromTurnMemory {
         }
     }
 
+    fun buildHudState(
+        nowMs: Long,
+        stage: TurnProbeStage,
+        detail: String = ""
+    ): CarromTurnHudState {
+        return CarromTurnHudState(
+            isActive = isTurnActive,
+            elapsedSec = elapsedMs(nowMs) / 1000f,
+            maxSec = MAX_TURN_BUDGET_MS / 1000f,
+            probeNumber = (_sliderMovesThisTurn + 1).coerceAtMost(MAX_BASELINE_PROBES),
+            maxProbes = totalPlannedProbes.coerceAtLeast(1).coerceAtMost(MAX_BASELINE_PROBES),
+            scanCount = scanCount,
+            rejectedCount = rejectedSpots.size,
+            stage = stage,
+            detail = detail
+        )
+    }
+
     fun formatTurnTelemetry(nowMs: Long, sol: CarromShotSolution): String {
         val sec = elapsedMs(nowMs) / 1000f
-        val status = if (sol.isSureShot) "SURE" else "BEST"
+        val status = when {
+            sol.isCollisionAssistedSureShot -> "CAROM-SURE"
+            sol.isSureShot -> "SURE"
+            sol.isBreakShot -> "BREAK-8.5s"
+            else -> "BEST-8.5s"
+        }
         return String.format(
             java.util.Locale.US,
-            "[9s Clock %.1fs/9.0s | %d scans, %d slides | %s]",
+            "[9s Clock %.1fs/9.0s | Probe %d/%d (%d rej) | %s]",
             sec,
-            scanCount.coerceAtLeast(1),
-            sliderMovesThisTurn,
+            (_sliderMovesThisTurn + 1).coerceAtMost(MAX_BASELINE_PROBES),
+            totalPlannedProbes.coerceAtLeast(1).coerceAtMost(MAX_BASELINE_PROBES),
+            rejectedSpots.size,
             status
         )
     }
@@ -284,6 +360,9 @@ class CarromTurnMemory {
         scanFrames.clear()
         visitedStrikerXs.clear()
         localSliderGains.clear()
+        rankedProbeQueue.clear()
+        rejectedSpots.clear()
+        probeQueueInitialized = false
         _sliderMovesThisTurn = 0
         bestEvaluatedThisTurn = null
     }

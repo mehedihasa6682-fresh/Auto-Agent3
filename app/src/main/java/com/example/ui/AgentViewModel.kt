@@ -12,6 +12,7 @@ import com.example.agent.CachedActionEntry
 import com.example.agent.ContactProfile
 import com.example.agent.TaskPlaybook
 import com.example.game.CarromMemoryData
+import com.example.game.CarromTurnHudState
 import com.example.service.LiveMediaProjectionCapturer
 import com.example.service.MediaProjectionCaptureService
 import com.example.service.TapPilotAccessibilityService
@@ -35,6 +36,7 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
     val isServiceConnected: StateFlow<Boolean> = AgentCoordinator.isServiceConnected
     val isLiveStreamActive: StateFlow<Boolean> = LiveMediaProjectionCapturer.isLiveActive
     val carromMemory: StateFlow<CarromMemoryData> = AgentCoordinator.carromMemory
+    val carromTurnHud: StateFlow<CarromTurnHudState?> = AgentCoordinator.carromTurnHud
     val settings: StateFlow<AgentSettings> = AgentCoordinator.settings
     val playbooks: StateFlow<List<TaskPlaybook>> = AgentCoordinator.playbooks
     val cachedActions: StateFlow<List<CachedActionEntry>> = AgentCoordinator.cachedActions

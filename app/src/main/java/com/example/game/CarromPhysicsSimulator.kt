@@ -33,11 +33,22 @@ data class RolloutVerificationResult(
     val predictedScratchFoul: Boolean,
     val predictedOpponentOnlyFoul: Boolean,
     val predictedKissBlock: Boolean,
+    val isCollisionAssistedSureShot: Boolean = false,
+    val rejectedDueToCollisionOrFoul: Boolean = false,
     val isSureShot: Boolean,
     val predictedStrikerPocketIndex: Int?,
     val physicsCompositeScore: Float,
     val rolloutsRun: Int,
     val elapsedMs: Long
+)
+
+data class RankedBaselineSpot(
+    val strikerX: Float,
+    val predictedScore: Float,
+    val predictedSureShot: Boolean,
+    val collisionAssisted: Boolean,
+    val targetCoinColor: CoinColor,
+    val pocketIndex: Int
 )
 
 /**
@@ -56,7 +67,7 @@ object CarromPhysicsSimulator {
     private const val DISC_RESTITUTION = 0.87f
     private const val RAIL_RESTITUTION = 0.80f
     private const val MAX_SIM_STEPS = 120
-    private const val SUBSTEPS_PER_STEP = 2
+    private const val SUBSTEPS_PER_STEP = 6
 
     private data class SimBody(
         var x: Float,
@@ -100,6 +111,7 @@ object CarromPhysicsSimulator {
             .take(8)
 
         val frictionScale = matchCalibration?.frictionScale ?: 1.0f
+        val shotPowerGain = matchCalibration?.shotPowerGain ?: 1.0f
         val jawSafetyBuffer = matchCalibration?.pocketJawSafetyBuffer ?: 0f
         val extraScratchGuard = shotMemory?.needsExtraScratchGuard() == true
 
@@ -110,7 +122,7 @@ object CarromPhysicsSimulator {
             val angleOffsetsDeg = if (candidate.isBreakShot) {
                 floatArrayOf(-2.0f, 0f, 2.0f)
             } else {
-                floatArrayOf(-2.2f, -1.1f, 0f, 1.1f, 2.2f)
+                floatArrayOf(-1.4f, -0.7f, 0f, 0.7f, 1.4f)
             }
             val powerFactors = if (candidate.isBankShot || candidate.isComboShot) {
                 floatArrayOf(0.92f, 1.04f, 1.16f)
@@ -123,8 +135,8 @@ object CarromPhysicsSimulator {
             var bestPowerFactor = 1.0f
             var bestOutcome: SingleRolloutOutcome? = null
 
-            // Track neighbor success rate at optimal power to measure shot robustness
-            val outcomesByAngle = HashMap<Float, SingleRolloutOutcome>()
+            // Track outcomes keyed by (pwrFactor, angleDeg) so neighbor robustness uses the exact winning power & angle
+            val outcomesByKey = HashMap<Pair<Float, Float>, SingleRolloutOutcome>()
 
             for (pwrFactor in powerFactors) {
                 for (angleDeg in angleOffsetsDeg) {
@@ -133,7 +145,7 @@ object CarromPhysicsSimulator {
                         board = board,
                         cutAngleDeg = candidate.cutAngleDeg,
                         totalDistance = candidate.totalDistance,
-                        pullMultiplier = candidate.basePullMultiplier * pwrFactor,
+                        pullMultiplier = candidate.basePullMultiplier * pwrFactor * shotPowerGain,
                         frictionScale = frictionScale
                     )
                     val outcome = runSingleRollout(
@@ -149,6 +161,7 @@ object CarromPhysicsSimulator {
                         extraScratchGuard = extraScratchGuard
                     )
                     totalRollouts++
+                    outcomesByKey[pwrFactor to angleDeg] = outcome
 
                     val localScore = scoreOutcome(
                         candidate = candidate,
@@ -162,24 +175,27 @@ object CarromPhysicsSimulator {
                         bestPowerFactor = pwrFactor
                         bestOutcome = outcome
                     }
-                    if (abs(pwrFactor - bestPowerFactor) < 0.01f) {
-                        outcomesByAngle[angleDeg] = outcome
-                    }
                 }
             }
 
             val chosenOutcome = bestOutcome ?: continue
-            // Measure robustness across +-1.1 / +-2.2 deg perturbations at the chosen power
+            // Measure robustness around bestAngleDeg at bestPowerFactor (+-0.6 / +-1.2 deg swipe jitter)
+            val neighborOffsets = if (candidate.isBreakShot) {
+                floatArrayOf(-2.0f, 0f, 2.0f)
+            } else {
+                floatArrayOf(-1.2f, -0.6f, 0f, 0.6f, 1.2f)
+            }
             var safeNeighbors = 0
             var neighborTotal = 0
-            for (angleDeg in angleOffsetsDeg) {
-                val neighborOutcome = outcomesByAngle[angleDeg] ?: run {
-                    val dir = rotateVector(candidate.baseDir, angleDeg)
+            for (deltaDeg in neighborOffsets) {
+                val testAngle = bestAngleDeg + deltaDeg
+                val neighborOutcome = outcomesByKey[bestPowerFactor to testAngle] ?: run {
+                    val dir = rotateVector(candidate.baseDir, testAngle)
                     val speed = computeInitialSpeedPx(
                         board = board,
                         cutAngleDeg = candidate.cutAngleDeg,
                         totalDistance = candidate.totalDistance,
-                        pullMultiplier = candidate.basePullMultiplier * bestPowerFactor,
+                        pullMultiplier = candidate.basePullMultiplier * bestPowerFactor * shotPowerGain,
                         frictionScale = frictionScale
                     )
                     totalRollouts++
@@ -197,8 +213,12 @@ object CarromPhysicsSimulator {
                     )
                 }
                 neighborTotal++
+                val oppOnly = neighborOutcome.pottedOpponentCoins > 0 &&
+                    neighborOutcome.pottedMyCoins == 0 &&
+                    !neighborOutcome.pottedQueen
                 val cleanPot = (neighborOutcome.pottedMyCoins > 0 || neighborOutcome.pottedQueen) &&
-                    !neighborOutcome.strikerScratched
+                    !neighborOutcome.strikerScratched &&
+                    !oppOnly
                 if (cleanPot || (candidate.isBreakShot && !neighborOutcome.strikerScratched)) {
                     safeNeighbors++
                 }
@@ -215,21 +235,29 @@ object CarromPhysicsSimulator {
                 chosenOutcome.pottedMyCoins == 0 &&
                 !chosenOutcome.pottedQueen
 
-            val predictedKissBlock = (!candidate.isBreakShot && !candidate.isComboShot && !chosenOutcome.firstStrikerHitIsTarget) ||
-                (chosenOutcome.targetDeflectedByNonTarget && chosenOutcome.pottedMyCoins == 0 && !chosenOutcome.pottedQueen)
-
-            val isSureShot = (chosenOutcome.pottedMyCoins > 0 || chosenOutcome.pottedQueen) &&
+            val anyCleanTargetPot = (chosenOutcome.pottedMyCoins > 0 || chosenOutcome.pottedQueen) &&
                 !chosenOutcome.strikerScratched &&
-                !opponentOnlyFoul &&
-                !predictedKissBlock &&
-                robustness >= 0.55f
+                !opponentOnlyFoul
+
+            val hasSecondaryCollision = !chosenOutcome.firstStrikerHitIsTarget ||
+                chosenOutcome.targetDeflectedByNonTarget ||
+                chosenOutcome.kissedObstacleCount > 0
+
+            // User rule: if a collision with another coin STILL cleanly sinks our coin/Queen without foul,
+            // it counts as a Sure Shot! Only colliding shots that MISS or FOUL are rejected.
+            val isSureShot = anyCleanTargetPot && robustness >= 0.55f
+            val isCollisionAssisted = isSureShot && hasSecondaryCollision
+            val rejectedByCollisionOrFoul = chosenOutcome.strikerScratched ||
+                opponentOnlyFoul ||
+                (!candidate.isBreakShot && hasSecondaryCollision && !anyCleanTargetPot)
 
             val compositeScore = (
-                bestLocalScore * 0.72f +
-                    candidate.staticScore * 0.28f +
-                    robustness * 0.16f +
+                bestLocalScore * 0.50f +
+                    candidate.staticScore * 0.22f +
+                    robustness * 0.18f +
                     (if (isSureShot) 0.10f else 0f) -
-                    heatmapRisk * 0.22f
+                    (if (isCollisionAssisted) 0.03f else 0f) -
+                    heatmapRisk * 0.20f
                 ).coerceIn(0.02f, 1.0f)
 
             val elapsedMs = ((System.nanoTime() - startNs) / 1_000_000L).coerceAtLeast(1L)
@@ -241,7 +269,9 @@ object CarromPhysicsSimulator {
                 predictedQueenPotted = chosenOutcome.pottedQueen,
                 predictedScratchFoul = chosenOutcome.strikerScratched,
                 predictedOpponentOnlyFoul = opponentOnlyFoul,
-                predictedKissBlock = predictedKissBlock,
+                predictedKissBlock = !candidate.isBreakShot && hasSecondaryCollision && !anyCleanTargetPot,
+                isCollisionAssistedSureShot = isCollisionAssisted,
+                rejectedDueToCollisionOrFoul = rejectedByCollisionOrFoul,
                 isSureShot = isSureShot,
                 predictedStrikerPocketIndex = chosenOutcome.strikerPocketIndex,
                 physicsCompositeScore = compositeScore,
@@ -249,7 +279,15 @@ object CarromPhysicsSimulator {
                 elapsedMs = elapsedMs
             )
 
-            if (bestPair == null || verification.physicsCompositeScore > bestPair.second.physicsCompositeScore) {
+            val currentBest = bestPair
+            val isBetter = currentBest == null ||
+                (verification.isSureShot && !currentBest.second.isSureShot) ||
+                (verification.isSureShot == currentBest.second.isSureShot && (
+                    verification.physicsCompositeScore > currentBest.second.physicsCompositeScore + 0.002f ||
+                        (abs(verification.physicsCompositeScore - currentBest.second.physicsCompositeScore) <= 0.002f &&
+                            verification.robustnessScore > currentBest.second.robustnessScore)
+                    ))
+            if (isBetter) {
                 bestPair = candidate to verification
             }
         }
@@ -259,6 +297,138 @@ object CarromPhysicsSimulator {
             val totalElapsed = ((System.nanoTime() - startNs) / 1_000_000L).coerceAtLeast(1L)
             cand to res.copy(rolloutsRun = totalRollouts, elapsedMs = totalElapsed)
         }
+    }
+
+    /**
+     * Ranks up to [maxSpots] distinct baseline striker X positions (>= [minSeparationPx] apart)
+     * across the board using fast 2D physics rollouts. Used to guide the 6–7 slider probes.
+     */
+    fun rankTopBaselinePositions(
+        board: CarromBoardLayout,
+        pieces: List<CarromPiece>,
+        myCoinColor: CoinColor,
+        candidates: List<RolloutCandidate>,
+        shotMemory: CarromMemoryData?,
+        matchCalibration: MatchPhysicsCalibration?,
+        maxSpots: Int = 7,
+        minSeparationPx: Float = max(44f, board.strikerRadiusPx * 1.45f)
+    ): List<RankedBaselineSpot> {
+        if (candidates.isEmpty() || board.pockets.size < 4) return emptyList()
+
+        val frictionScale = matchCalibration?.frictionScale ?: 1.0f
+        val shotPowerGain = matchCalibration?.shotPowerGain ?: 1.0f
+        val jawSafetyBuffer = matchCalibration?.pocketJawSafetyBuffer ?: 0f
+        val extraScratchGuard = shotMemory?.needsExtraScratchGuard() == true
+
+        // Keep top 2 static candidates per distinct quantized X bucket (every 18px) for fast rollout evaluation
+        val bucketBest = LinkedHashMap<Int, List<RolloutCandidate>>()
+        val sortedByStatic = candidates.sortedByDescending { it.staticScore }
+        for (cand in sortedByStatic) {
+            val bucketKey = (cand.strikerPos.x / 18f).toInt()
+            val list = bucketBest[bucketKey] ?: emptyList()
+            if (list.size < 2) {
+                bucketBest[bucketKey] = list + cand
+            }
+        }
+
+        val evaluatedSpots = ArrayList<RankedBaselineSpot>(bucketBest.size)
+        val probeAngles = floatArrayOf(-1.5f, 0f, 1.5f)
+        val probePowers = floatArrayOf(0.95f, 1.08f)
+
+        for ((_, candsAtX) in bucketBest) {
+            var bestScoreForX = Float.NEGATIVE_INFINITY
+            var bestSureForX = false
+            var bestCollisionAssistedForX = false
+            var bestColorForX = myCoinColor
+            var bestPocketForX = 0
+
+            for (cand in candsAtX) {
+                var bestCandScore = Float.NEGATIVE_INFINITY
+                var cleanAngleHits = 0
+                var bestOutcome: SingleRolloutOutcome? = null
+
+                for (pwr in probePowers) {
+                    var angleHitsAtPwr = 0
+                    for (ang in probeAngles) {
+                        val dir = rotateVector(cand.baseDir, ang)
+                        val speed = computeInitialSpeedPx(
+                            board = board,
+                            cutAngleDeg = cand.cutAngleDeg,
+                            totalDistance = cand.totalDistance,
+                            pullMultiplier = cand.basePullMultiplier * pwr * shotPowerGain,
+                            frictionScale = frictionScale
+                        )
+                        val outcome = runSingleRollout(
+                            board = board,
+                            pieces = pieces,
+                            strikerPos = cand.strikerPos,
+                            shotDir = dir,
+                            initialSpeed = speed,
+                            targetCoin = cand.targetCoin,
+                            myCoinColor = myCoinColor,
+                            frictionScale = frictionScale,
+                            jawSafetyBuffer = jawSafetyBuffer,
+                            extraScratchGuard = extraScratchGuard
+                        )
+                        val oppOnly = outcome.pottedOpponentCoins > 0 && outcome.pottedMyCoins == 0 && !outcome.pottedQueen
+                        val cleanPot = (outcome.pottedMyCoins > 0 || outcome.pottedQueen) && !outcome.strikerScratched && !oppOnly
+                        if (cleanPot) {
+                            angleHitsAtPwr++
+                        }
+                        val s = scoreOutcome(cand, outcome, ang, shotMemory)
+                        if (s > bestCandScore) {
+                            bestCandScore = s
+                            bestOutcome = outcome
+                        }
+                    }
+                    if (angleHitsAtPwr > cleanAngleHits) {
+                        cleanAngleHits = angleHitsAtPwr
+                    }
+                }
+
+                val out = bestOutcome ?: continue
+                val oppOnly = out.pottedOpponentCoins > 0 && out.pottedMyCoins == 0 && !out.pottedQueen
+                if (out.strikerScratched || oppOnly) continue
+
+                val hasSecondaryCollision = !out.firstStrikerHitIsTarget || out.targetDeflectedByNonTarget || out.kissedObstacleCount > 0
+                val isSure = (out.pottedMyCoins > 0 || out.pottedQueen) && cleanAngleHits >= 2
+                val composite = (bestCandScore * 0.75f + cand.staticScore * 0.25f + if (isSure) 0.14f else 0f)
+                if (composite > bestScoreForX) {
+                    bestScoreForX = composite
+                    bestSureForX = isSure
+                    bestCollisionAssistedForX = isSure && hasSecondaryCollision
+                    bestColorForX = cand.targetCoin.color
+                    bestPocketForX = cand.pocketIndex
+                }
+            }
+
+            if (bestScoreForX > Float.NEGATIVE_INFINITY) {
+                evaluatedSpots.add(
+                    RankedBaselineSpot(
+                        strikerX = candsAtX.first().strikerPos.x,
+                        predictedScore = bestScoreForX,
+                        predictedSureShot = bestSureForX,
+                        collisionAssisted = bestCollisionAssistedForX,
+                        targetCoinColor = bestColorForX,
+                        pocketIndex = bestPocketForX
+                    )
+                )
+            }
+        }
+
+        // Sort prioritized by Sure Shot flag, then score descending, and enforce minimum X spacing
+        val sorted = evaluatedSpots.sortedWith(
+            compareByDescending<RankedBaselineSpot> { it.predictedSureShot }
+                .thenByDescending { it.predictedScore }
+        )
+        val picked = ArrayList<RankedBaselineSpot>(maxSpots)
+        for (spot in sorted) {
+            if (picked.none { abs(it.strikerX - spot.strikerX) < minSeparationPx }) {
+                picked.add(spot)
+                if (picked.size >= maxSpots) break
+            }
+        }
+        return picked
     }
 
     internal fun runSingleRollout(
@@ -519,16 +689,22 @@ object CarromPhysicsSimulator {
             score += prox - if (outcome.targetDeflectedByNonTarget) 0.38f else 0.16f
         }
 
-        if (!candidate.isBreakShot && !candidate.isComboShot && !outcome.firstStrikerHitIsTarget) {
-            // Striker clipped another coin before hitting intended target -> kiss-miss risk
-            score -= 0.36f
-        } else if (!candidate.isBreakShot && outcome.targetDeflectedByNonTarget && outcome.pottedMyCoins == 0) {
-            score -= 0.22f
+        val didPocketTarget = outcome.pottedMyCoins > 0 || outcome.pottedQueen
+        if (!candidate.isBreakShot && !outcome.firstStrikerHitIsTarget) {
+            if (!didPocketTarget) {
+                // Collision caused a miss -> strong rejection penalty
+                score -= 0.40f
+            } else {
+                // Collision still sank our coin/Queen cleanly -> mild preference for clean direct hits
+                score -= 0.04f
+            }
+        } else if (!candidate.isBreakShot && outcome.targetDeflectedByNonTarget && !didPocketTarget) {
+            score -= 0.28f
         }
 
         if (outcome.pottedOpponentCoins > 0 && outcome.pottedMyCoins > 0) {
             score -= 0.08f
-        } else if ((outcome.pottedMyCoins > 0 || outcome.pottedQueen) &&
+        } else if (didPocketTarget &&
             outcome.firstStrikerHitIsTarget &&
             !outcome.targetDeflectedByNonTarget &&
             outcome.pottedOpponentCoins == 0

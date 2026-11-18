@@ -157,6 +157,7 @@ data class MatchPhysicsCalibration(
     val frictionScale: Float = 1.0f,
     val pocketJawSafetyBuffer: Float = 0f,
     val sliderGain: Float = 1.0f,
+    val shotPowerGain: Float = 1.0f,
     val sliderSamples: Int = 0,
     val shotsThisMatch: Int = 0
 )
@@ -488,6 +489,7 @@ class CarromShotMemoryStore(context: Context) {
             var newHeatmap = current.scratchHeatmap
             var newFrictionScale = prevCal.frictionScale
             var newJawBuffer = prevCal.pocketJawSafetyBuffer
+            var newShotPowerGain = prevCal.shotPowerGain
 
             when (outcomeType) {
                 CarromShotOutcomeType.POCKETED_MY_COIN, CarromShotOutcomeType.POCKETED_QUEEN -> {
@@ -497,6 +499,7 @@ class CarromShotMemoryStore(context: Context) {
                         pendingShot.strikerNormalizedX
                     )
                     newJawBuffer = (newJawBuffer - 0.8f).coerceIn(0f, 10f)
+                    newShotPowerGain = ((newShotPowerGain * 0.94f) + 0.06f).coerceIn(0.78f, 1.28f)
                 }
                 CarromShotOutcomeType.FOUL_SCRATCH_OR_PENALTY -> {
                     newHeatmap = newHeatmap.recordFoul(
@@ -505,13 +508,18 @@ class CarromShotMemoryStore(context: Context) {
                         pendingShot.strikerNormalizedX
                     )
                     newJawBuffer = (newJawBuffer + 2.2f).coerceIn(0f, 10f)
+                    newShotPowerGain = (newShotPowerGain - 0.04f).coerceIn(0.78f, 1.28f)
                 }
                 CarromShotOutcomeType.MISSED_OR_NO_POT -> {
                     if (pendingShot.isBankShot || angleBucket == CarromAngleBucket.SHARP_CUT) {
                         newFrictionScale = (newFrictionScale + 0.04f).coerceIn(0.80f, 1.28f)
                         newJawBuffer = (newJawBuffer + 1.4f).coerceIn(0f, 10f)
+                        newShotPowerGain = (newShotPowerGain + 0.03f).coerceIn(0.78f, 1.28f)
                     } else if (pendingShot.powerStyle == CarromPowerStyle.HARD) {
                         newFrictionScale = (newFrictionScale - 0.03f).coerceIn(0.80f, 1.28f)
+                        newShotPowerGain = (newShotPowerGain - 0.03f).coerceIn(0.78f, 1.28f)
+                    } else {
+                        newShotPowerGain = (newShotPowerGain + 0.02f).coerceIn(0.78f, 1.28f)
                     }
                 }
             }
@@ -523,6 +531,7 @@ class CarromShotMemoryStore(context: Context) {
                 matchCalibration = prevCal.copy(
                     frictionScale = newFrictionScale,
                     pocketJawSafetyBuffer = newJawBuffer,
+                    shotPowerGain = newShotPowerGain,
                     shotsThisMatch = prevCal.shotsThisMatch + 1
                 ),
                 straightFoulCount = straightFouls,
@@ -585,6 +594,7 @@ class CarromShotMemoryStore(context: Context) {
                 .put("frictionScale", cal.frictionScale.toDouble())
                 .put("pocketJawSafetyBuffer", cal.pocketJawSafetyBuffer.toDouble())
                 .put("sliderGain", cal.sliderGain.toDouble())
+                .put("shotPowerGain", cal.shotPowerGain.toDouble())
                 .put("sliderSamples", cal.sliderSamples)
                 .put("shotsThisMatch", cal.shotsThisMatch)
 
@@ -660,6 +670,7 @@ class CarromShotMemoryStore(context: Context) {
                     frictionScale = calObj.optDouble("frictionScale", 1.0).toFloat().coerceIn(0.80f, 1.28f),
                     pocketJawSafetyBuffer = calObj.optDouble("pocketJawSafetyBuffer", 0.0).toFloat().coerceIn(0f, 10f),
                     sliderGain = calObj.optDouble("sliderGain", 1.0).toFloat().coerceIn(0.65f, 1.45f),
+                    shotPowerGain = calObj.optDouble("shotPowerGain", 1.0).toFloat().coerceIn(0.78f, 1.28f),
                     sliderSamples = calObj.optInt("sliderSamples", 0).coerceAtLeast(0),
                     shotsThisMatch = calObj.optInt("shotsThisMatch", 0).coerceAtLeast(0)
                 )

@@ -113,6 +113,8 @@ import com.example.agent.TaskPlaybook
 import com.example.ai.ApiKeyFailoverManager
 import com.example.ai.BulkKeyImporter
 import com.example.game.CarromMemoryData
+import com.example.game.CarromTurnHudState
+import com.example.game.TurnProbeStage
 import com.example.ui.theme.AmberContainer
 import com.example.ui.theme.AmberWarning
 import com.example.ui.theme.CrimsonContainer
@@ -570,10 +572,10 @@ fun CommandDeckCard(
                                 .testTag("carrom_telemetry_pill")
                         ) {
                             Text(
-                                text = "Gain %.2fx • Friction %.2fx • Zones %d".format(
+                                text = "Slider %.2fx • Power %.2fx • Friction %.2fx".format(
                                     cal.sliderGain,
-                                    cal.frictionScale,
-                                    carromMemory.scratchHeatmap.zoneRiskByKey.size
+                                    cal.shotPowerGain,
+                                    cal.frictionScale
                                 ),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = ElectricCyan
@@ -1062,8 +1064,12 @@ fun SensitiveConfirmCard(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun AgentOutcomeBanner(state: AgentUiState) {
+fun AgentOutcomeBanner(
+    state: AgentUiState,
+    carromTurnHud: CarromTurnHudState? = null
+) {
     when (state) {
         is AgentUiState.Running -> {
             Card(
@@ -1083,8 +1089,62 @@ fun AgentOutcomeBanner(state: AgentUiState) {
                         style = MaterialTheme.typography.labelSmall,
                         color = CyberTeal
                     )
+                    if (carromTurnHud != null && carromTurnHud.isActive) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        val stageColor = when (carromTurnHud.stage) {
+                            TurnProbeStage.LOCKED_SURE_SHOT -> CyberTeal
+                            TurnProbeStage.CAROM_SURE_SHOT, TurnProbeStage.PROBING_SLIDER, TurnProbeStage.PRE_SCAN -> ElectricCyan
+                            TurnProbeStage.FALLBACK_FIRE -> AmberWarning
+                        }
+                        val clockColor = if (carromTurnHud.elapsedSec >= 7.0f) AmberWarning else CyberTeal
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.testTag("carrom_turn_hud_row")
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(SlateSurfaceElevated)
+                                    .border(1.dp, clockColor.copy(alpha = 0.7f), RoundedCornerShape(8.dp))
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    text = "CLOCK %.1fs / %.1fs".format(carromTurnHud.elapsedSec, carromTurnHud.maxSec),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = clockColor
+                                )
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(SlateSurfaceElevated)
+                                    .border(1.dp, SlateBorder, RoundedCornerShape(8.dp))
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    text = "PROBE ${carromTurnHud.probeNumber}/${carromTurnHud.maxProbes} • ${carromTurnHud.rejectedCount} REJ",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(stageColor.copy(alpha = 0.16f))
+                                    .border(1.dp, stageColor, RoundedCornerShape(8.dp))
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    text = carromTurnHud.stage.badge,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = stageColor
+                                )
+                            }
+                        }
+                    }
                     if (state.lastThought.isNotBlank()) {
-                        Spacer(modifier = Modifier.height(4.dp))
+                        Spacer(modifier = Modifier.height(6.dp))
                         Text(
                             text = state.lastThought,
                             style = MaterialTheme.typography.bodyMedium,

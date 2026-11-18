@@ -71,6 +71,7 @@ fun DashboardScreen(viewModel: AgentViewModel) {
     val isConnected by viewModel.isServiceConnected.collectAsStateWithLifecycle()
     val isLiveStreamActive by viewModel.isLiveStreamActive.collectAsStateWithLifecycle()
     val carromMemory by viewModel.carromMemory.collectAsStateWithLifecycle()
+    val carromTurnHud by viewModel.carromTurnHud.collectAsStateWithLifecycle()
     val isEnabledInSettings by viewModel.isAccessibilityEnabledInSettings.collectAsStateWithLifecycle()
     val goalText by viewModel.goalText.collectAsStateWithLifecycle()
     val executionMode by viewModel.executionMode.collectAsStateWithLifecycle()
@@ -82,6 +83,8 @@ fun DashboardScreen(viewModel: AgentViewModel) {
     var showSettingsSheet by rememberSaveable { mutableStateOf(false) }
     var showContactDialog by remember { mutableStateOf(false) }
     var editingContact by remember { mutableStateOf<ContactProfile?>(null) }
+    var autoRequestedProjectionThisSession by rememberSaveable { mutableStateOf(false) }
+    var launchPendingAfterProjection by remember { mutableStateOf(false) }
 
     val mediaProjectionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
@@ -90,13 +93,34 @@ fun DashboardScreen(viewModel: AgentViewModel) {
         if (result.resultCode == Activity.RESULT_OK && data != null) {
             viewModel.startLiveProjection(result.resultCode, data)
         }
+        if (launchPendingAfterProjection) {
+            launchPendingAfterProjection = false
+            viewModel.launchAgent()
+        }
+    }
+
+    fun proceedWithLaunchOrProjection() {
+        val isCarromGoal = com.example.agent.CarromContextHelper.isCarromGoalOrApp(
+            goal = goalText,
+            packageName = "",
+            playbookTopicKey = null
+        )
+        if (isCarromGoal && !isLiveStreamActive && !autoRequestedProjectionThisSession) {
+            val manager = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
+            if (manager != null) {
+                autoRequestedProjectionThisSession = true
+                launchPendingAfterProjection = true
+                mediaProjectionLauncher.launch(manager.createScreenCaptureIntent())
+                return
+            }
+        }
+        viewModel.launchAgent()
     }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { _ ->
-        // Launch monitor regardless so foreground keep-alive starts cleanly even if notification is silent
-        viewModel.launchAgent()
+        proceedWithLaunchOrProjection()
     }
 
     DisposableEffect(lifecycleOwner) {
@@ -132,7 +156,7 @@ fun DashboardScreen(viewModel: AgentViewModel) {
                 return
             }
         }
-        viewModel.launchAgent()
+        proceedWithLaunchOrProjection()
     }
 
     fun toggleLiveStream() {
@@ -240,7 +264,10 @@ fun DashboardScreen(viewModel: AgentViewModel) {
                 }
 
                 item {
-                    AgentOutcomeBanner(state = agentState)
+                    AgentOutcomeBanner(
+                        state = agentState,
+                        carromTurnHud = carromTurnHud
+                    )
                 }
 
                 if (workingMemory.isNotBlank()) {
