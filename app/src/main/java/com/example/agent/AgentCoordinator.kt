@@ -1,6 +1,7 @@
 package com.example.agent
 
 import android.content.Context
+import android.content.Intent
 import android.util.Log
 import com.example.ai.ApiKeyFailoverManager
 import com.example.ai.GeminiAiPlanner
@@ -240,7 +241,12 @@ object AgentCoordinator {
 
         val initialSettings = _settings.value
         val firebaseReady = aiPlanner.isFirebaseConfigured()
-        if (!initialSettings.hasAnyRunnableKey(firebaseReady)) {
+        val isCarromGoal = CarromContextHelper.isCarromGoalOrApp(
+            goal = goal,
+            packageName = "",
+            playbookTopicKey = null
+        )
+        if (!isCarromGoal && !initialSettings.hasAnyRunnableKey(firebaseReady)) {
             _uiState.value = AgentUiState.Error(
                 goal = goal,
                 message = "No active API key configured. Open Settings and paste 1–30 free keys for Google AI Studio, Groq Cloud, or OpenRouter.",
@@ -274,8 +280,30 @@ object AgentCoordinator {
             try {
                 var activePlaybook = knowledgeStore?.findMatchingPlaybook(goal)
                 var lastOutcomeHint = ""
+                val isCarromTaskGoal = CarromContextHelper.isCarromGoalOrApp(
+                    goal = goal,
+                    packageName = "",
+                    playbookTopicKey = activePlaybook?.topicKey
+                )
 
-                if (activePlaybook == null && initialSettings.autoResearchBeforeTask) {
+                if (activePlaybook == null && isCarromTaskGoal) {
+                    val effectiveRuleAtStart = resolveCarromRuleMode(goal, initialSettings.carromRuleMode)
+                    val builtIn = CarromContextHelper.buildDefaultCarromPlaybook(effectiveRuleAtStart)
+                    activePlaybook = knowledgeStore?.saveOrMergePlaybook(builtIn) ?: builtIn
+                    workingMemory = "Loaded built-in Carrom Playbook [${activePlaybook.topicTitle}] (${activePlaybook.winningStrategies.size} tactics, ${activePlaybook.foulLessons.size} foul guards)."
+                    appendTrace(
+                        trace,
+                        AgentStepLog(
+                            stepNumber = 0,
+                            timestampMs = System.currentTimeMillis(),
+                            actionType = AgentActionType.WAIT,
+                            targetSummary = "Playbook: ${activePlaybook.topicTitle}",
+                            reason = "Loaded built-in Carrom Playbook instantly (0ms, no research stall).",
+                            status = StepStatus.COMPLETED,
+                            requiresConfirmation = false
+                        )
+                    )
+                } else if (activePlaybook == null && initialSettings.autoResearchBeforeTask) {
                     _uiState.value = AgentUiState.Running(
                         goal = goal,
                         mode = mode,
@@ -286,9 +314,11 @@ object AgentCoordinator {
                         workingMemory = workingMemory,
                         trace = trace.toList()
                     )
-                    val researched = withContext(Dispatchers.IO) {
-                        aiPlanner.researchTaskPlaybook(goal, initialSettings)
-                    }.getOrNull()
+                    val researched = withTimeoutOrNull(12_000L) {
+                        withContext(Dispatchers.IO) {
+                            aiPlanner.researchTaskPlaybook(goal, initialSettings)
+                        }.getOrNull()
+                    }
 
                     if (researched != null) {
                         activePlaybook = knowledgeStore?.saveOrMergePlaybook(researched) ?: researched
@@ -312,7 +342,26 @@ object AgentCoordinator {
                     workingMemory = "Loaded trained playbook [${activePlaybook.topicTitle}] (${activePlaybook.winningStrategies.size} tactics, ${activePlaybook.foulLessons.size} foul guards)."
                 }
 
-                if (initialSettings.goHomeOnLaunch) {
+                var launchedCarromDirectly = false
+                if (isCarromTaskGoal) {
+                    val launched = appContext?.let { tryLaunchInstalledCarromApp(it) } == true
+                    if (launched) {
+                        launchedCarromDirectly = true
+                        _uiState.value = AgentUiState.Running(
+                            goal = goal,
+                            mode = mode,
+                            currentStep = 0,
+                            maxSteps = maxStepsLimit,
+                            phase = AgentPhase.ACTING,
+                            lastThought = "Opening Carrom game...",
+                            workingMemory = workingMemory,
+                            trace = trace.toList()
+                        )
+                        delay(1_800L)
+                    }
+                }
+
+                if (!launchedCarromDirectly && initialSettings.goHomeOnLaunch) {
                     _uiState.value = AgentUiState.Running(
                         goal = goal,
                         mode = mode,
@@ -407,8 +456,12 @@ object AgentCoordinator {
                         packageName = snapshot.packageName,
                         playbookTopicKey = activePlaybook?.topicKey
                     )
-                    val isLikelyCarromLobby = isCarromContext && CarromContextHelper.isLikelyGameLobbyMenu(snapshot.nodes)
-                    val isActiveCarromMatchScreen = isCarromContext && !isLikelyCarromLobby
+                    val selfPkg = appContext?.packageName ?: "com.example"
+                    val isNonGameApp = snapshot.packageName == selfPkg ||
+                        snapshot.packageName.contains("launcher", ignoreCase = true) ||
+                        snapshot.packageName == "com.android.systemui"
+                    val isLikelyCarromLobby = isCarromContext && (isNonGameApp || CarromContextHelper.isLikelyGameLobbyMenu(snapshot.nodes))
+                    val isActiveCarromMatchScreen = isCarromContext && !isNonGameApp && !isLikelyCarromLobby
 
                     val cacheMatch = if (
                         currentSettings.useZeroApiActionCache &&
@@ -522,19 +575,7 @@ object AgentCoordinator {
 
                     var nextPendingCarromShotCandidate: PendingCarromShotRecord? = null
                     var aiPreCarromCounts: BoardPieceCounts? = null
-                    val effectiveCarromRule = when {
-                        goal.contains("freestyle", ignoreCase = true) ||
-                            goal.contains("ফ্রি স্টাইল") ||
-                            goal.contains("ফ্রিস্টাইল") ||
-                            goal.contains("সব গুটি") -> CarromRuleMode.FREESTYLE
-                        goal.contains("only black", ignoreCase = true) ||
-                            goal.contains("disc pool black", ignoreCase = true) ||
-                            goal.contains("শুধু কালো") -> CarromRuleMode.BLACK_ONLY
-                        goal.contains("only white", ignoreCase = true) ||
-                            goal.contains("disc pool white", ignoreCase = true) ||
-                            goal.contains("শুধু সাদা") -> CarromRuleMode.WHITE_ONLY
-                        else -> currentSettings.carromRuleMode
-                    }
+                    val effectiveCarromRule = resolveCarromRuleMode(goal, currentSettings.carromRuleMode)
                     val isFreestyleMode = effectiveCarromRule == CarromRuleMode.FREESTYLE
                     val myCarromCoinColor = if (effectiveCarromRule == CarromRuleMode.BLACK_ONLY) {
                         CoinColor.BLACK
@@ -957,7 +998,42 @@ object AgentCoordinator {
                                         msg.contains("Missing API key", ignoreCase = true) ||
                                         msg.contains("HTTP 401") ||
                                         msg.contains("HTTP 403")
-                                    if (mode == AgentExecutionMode.CONTINUOUS_MONITOR && !isConfigOrAuthError) {
+                                    val hasKeys = currentSettings.hasAnyRunnableKey(isFirebaseConfigured())
+                                    val canRecoverInCarromZeroApi = isCarromContext && (!hasKeys || !isNonGameApp)
+                                    if (canRecoverInCarromZeroApi && (!isNonGameApp || mode == AgentExecutionMode.CONTINUOUS_MONITOR || step <= 3)) {
+                                        val waitReason = when {
+                                            !hasKeys && isNonGameApp ->
+                                                "Zero-API Carrom ready — open Carrom match board on screen..."
+                                            !hasKeys ->
+                                                "Waiting for Carrom match board (Zero-API local solver)..."
+                                            else ->
+                                                "Waiting for board settle / AI hiccup: $msg"
+                                        }
+                                        appendTrace(
+                                            trace,
+                                            AgentStepLog(
+                                                stepNumber = step,
+                                                timestampMs = System.currentTimeMillis(),
+                                                actionType = AgentActionType.WAIT,
+                                                targetSummary = "Carrom standby",
+                                                reason = waitReason,
+                                                status = StepStatus.WAITING,
+                                                requiresConfirmation = false
+                                            )
+                                        )
+                                        sleepMonitorInterval(
+                                            goal = goal,
+                                            mode = mode,
+                                            step = step,
+                                            maxSteps = maxStepsLimit,
+                                            waitSec = if (!isNonGameApp) 1 else 2,
+                                            reason = waitReason,
+                                            workingMemory = workingMemory,
+                                            trace = trace
+                                        )
+                                        step++
+                                        continue
+                                    } else if (mode == AgentExecutionMode.CONTINUOUS_MONITOR && !isConfigOrAuthError) {
                                         // Recoverable network/transient hiccup in all-day monitor: wait and retry
                                         appendTrace(
                                             trace,
@@ -1529,6 +1605,48 @@ object AgentCoordinator {
 
     private fun isFirebaseConfigured(): Boolean {
         return runCatching { com.google.firebase.FirebaseApp.getInstance() }.isSuccess
+    }
+
+    private fun resolveCarromRuleMode(
+        goal: String,
+        configured: CarromRuleMode
+    ): CarromRuleMode {
+        return when {
+            goal.contains("freestyle", ignoreCase = true) ||
+                goal.contains("ফ্রি স্টাইল") ||
+                goal.contains("ফ্রিস্টাইল") ||
+                goal.contains("সব গুটি") -> CarromRuleMode.FREESTYLE
+            goal.contains("only black", ignoreCase = true) ||
+                goal.contains("disc pool black", ignoreCase = true) ||
+                goal.contains("শুধু কালো") -> CarromRuleMode.BLACK_ONLY
+            goal.contains("only white", ignoreCase = true) ||
+                goal.contains("disc pool white", ignoreCase = true) ||
+                goal.contains("শুধু সাদা") -> CarromRuleMode.WHITE_ONLY
+            else -> configured
+        }
+    }
+
+    private fun tryLaunchInstalledCarromApp(context: Context): Boolean {
+        val candidatePackages = listOf(
+            "com.miniclip.carrom",
+            "com.miniclip.carrom.freestyle",
+            "com.moonfrog.carromgold",
+            "com.gametion.carromking",
+            "com.appsoleutgames.carrom"
+        )
+        val pm = context.packageManager
+        for (pkg in candidatePackages) {
+            val launchIntent = runCatching { pm.getLaunchIntentForPackage(pkg) }.getOrNull()
+            if (launchIntent != null) {
+                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+                val started = runCatching { context.startActivity(launchIntent) }.isSuccess
+                if (started) {
+                    Log.i(TAG, "Auto-launched installed Carrom package: $pkg")
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     private fun extractMemory(state: AgentUiState): String = when (state) {

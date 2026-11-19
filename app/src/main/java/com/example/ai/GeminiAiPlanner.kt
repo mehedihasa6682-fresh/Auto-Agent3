@@ -214,7 +214,7 @@ class GeminiAiPlanner {
                 - foulLessons: 3-5 exact fouls/mistakes to avoid (e.g. for Carrom: pocketing striker = foul & return coin; hitting opponent piece directly before yours; pocketing opponent piece accidentally)
             """.trimIndent()
 
-            val attempt = withTimeout(INFERENCE_TIMEOUT_MS * 2) {
+            val attempt = withTimeout(12_000L) {
                 ApiKeyFailoverManager.executeWithFailover(
                     settings = settings,
                     firebaseConfigured = isFirebaseConfigured(),

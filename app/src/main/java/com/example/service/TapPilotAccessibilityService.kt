@@ -84,10 +84,10 @@ class TapPilotAccessibilityService : AccessibilityService() {
         val (width, height) = getScreenDimensions()
 
         // Temporarily hide floating overlay so screenshots capture unobstructed target UI.
+        val minFrameTs = SystemClock.uptimeMillis()
         overlayController?.setTemporarilyHidden(true)
         val settleMs = if (LiveMediaProjectionCapturer.isLiveActive.value) 50L else 80L
         delay(settleMs)
-        val minFrameTs = SystemClock.uptimeMillis()
         val captureResult = try {
             ScreenCapturer.capture(this, useScreenshot, minFrameTs)
         } finally {

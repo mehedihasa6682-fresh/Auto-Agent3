@@ -1578,4 +1578,43 @@ class AgentLogicUnitTest {
         // Default AgentSettings also defaults to Freestyle mode
         assertEquals(com.example.agent.CarromRuleMode.FREESTYLE, com.example.agent.AgentSettings().carromRuleMode)
     }
+
+    @Test
+    fun `built in carrom playbook builds instantly and avoids cycle zero research stall`() {
+        val freestylePb = com.example.agent.CarromContextHelper.buildDefaultCarromPlaybook(
+            com.example.agent.CarromRuleMode.FREESTYLE
+        )
+        assertEquals("carrom_board_game", freestylePb.topicKey)
+        assertTrue(freestylePb.topicTitle.contains("Freestyle", ignoreCase = true))
+        assertTrue(freestylePb.rulesSummary.contains("White, Black, and Red", ignoreCase = true))
+        assertTrue(freestylePb.foulLessons.any { it.contains("Striker falling into any pocket", ignoreCase = true) })
+        assertTrue(freestylePb.winningStrategies.size >= 4)
+
+        val presetGoal = "Open Carrom game, research board rules and foul conditions first, position the striker with DRAG, aim opposite the pocket to pot my coins cleanly, evaluate each shot outcome, and save winning angles & foul mistakes in my playbook."
+        assertTrue(
+            com.example.agent.CarromContextHelper.isCarromGoalOrApp(
+                goal = presetGoal,
+                packageName = "",
+                playbookTopicKey = null
+            )
+        )
+
+        val lobbyNodes = listOf(
+            ScreenNode(
+                id = 1,
+                className = "android.widget.Button",
+                text = "Freestyle",
+                contentDesc = "",
+                viewId = "btn_freestyle",
+                bounds = ScreenBounds(200, 800, 600, 900),
+                isClickable = true,
+                isEditable = false,
+                isScrollable = false,
+                isChecked = false,
+                isFocused = false
+            )
+        )
+        assertTrue(com.example.agent.CarromContextHelper.isLikelyGameLobbyMenu(lobbyNodes))
+        assertFalse(com.example.agent.CarromContextHelper.isLikelyGameLobbyMenu(emptyList()))
+    }
 }

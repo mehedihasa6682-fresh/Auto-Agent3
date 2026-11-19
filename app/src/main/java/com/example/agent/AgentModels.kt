@@ -484,4 +484,30 @@ object CarromContextHelper {
                 )
         }
     }
+
+    fun buildDefaultCarromPlaybook(ruleMode: CarromRuleMode = CarromRuleMode.FREESTYLE): TaskPlaybook {
+        val isFreestyle = ruleMode == CarromRuleMode.FREESTYLE
+        val ruleDesc = if (isFreestyle) {
+            "Freestyle Carrom: White, Black, and Red (Queen) coins are all legal targets. Only striker pocket scratch is a foul. Cover Red (Queen) when needed. Move bottom slider knob horizontally to align striker, then slingshot-drag striker center opposite pocket direction."
+        } else {
+            "Disc Pool Carrom (${ruleMode.label}): Pocket only your assigned color coins + Red (Queen). Pocketing only opponent coins or scratching striker into a pocket is a foul."
+        }
+        return TaskPlaybook(
+            topicKey = "carrom_board_game",
+            topicTitle = if (isFreestyle) "Carrom Freestyle" else "Carrom Disc Pool",
+            rulesSummary = ruleDesc,
+            winningStrategies = listOf(
+                "Pre-scan board and rank top 7 baseline striker X spots before sliding.",
+                "Slide bottom slider knob to probe candidate spots (up to 7 moves) until physics verifies a Sure Shot.",
+                "Accept collision-assisted carom shots when they still pocket a valid coin cleanly with zero striker scratch.",
+                "Pull slingshot opposite to pocket vector from striker center; shoot safest break/pot before 8.5s cutoff."
+            ),
+            foulLessons = listOf(
+                "Striker falling into any pocket is a foul — reject straight scratch trajectories via 2D physics rollout.",
+                "Reject colliding lines that deflect target away from pocket or cause striker scratch."
+            ),
+            trainingSessions = 1,
+            lastUpdatedMs = System.currentTimeMillis()
+        )
+    }
 }
