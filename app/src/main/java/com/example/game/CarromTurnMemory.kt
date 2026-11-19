@@ -297,7 +297,8 @@ class CarromTurnMemory {
         screenHeight: Int,
         shotMemory: CarromMemoryData?,
         usePhysicsRollout: Boolean,
-        fallbackSolution: CarromShotSolution
+        fallbackSolution: CarromShotSolution,
+        isFreestyle: Boolean = false
     ): CarromShotSolution {
         val consensusPieces = buildConsensusPieces(latestPieces, board.coinRadiusPx)
         val combinedPieces = if (striker != null) consensusPieces + striker else consensusPieces
@@ -311,7 +312,8 @@ class CarromTurnMemory {
                 screenHeight = screenHeight,
                 existingStriker = striker,
                 shotMemory = shotMemory,
-                usePhysicsRollout = usePhysicsRollout
+                usePhysicsRollout = usePhysicsRollout,
+                isFreestyle = isFreestyle
             ) ?: fallbackSolution
         } else {
             fallbackSolution

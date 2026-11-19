@@ -78,6 +78,12 @@ enum class AiRoutingStrategy(val label: String) {
     STICKY_FAILOVER("Sticky Primary + Failover")
 }
 
+enum class CarromRuleMode(val label: String) {
+    FREESTYLE("Freestyle (All Coins)"),
+    WHITE_ONLY("Disc Pool: White"),
+    BLACK_ONLY("Disc Pool: Black")
+}
+
 enum class AgentActionType {
     TAP,
     DRAG,
@@ -377,6 +383,7 @@ data class AgentSettings(
     val turboDualKeyGameMode: Boolean = true,
     val useZeroApiActionCache: Boolean = true,
     val carromPrecisionSolver: Boolean = true,
+    val carromRuleMode: CarromRuleMode = CarromRuleMode.FREESTYLE,
     val usePhysicsRollout: Boolean = true,
     val useSubPixelCircleRefinement: Boolean = true,
     val useClosedLoopSliderVerify: Boolean = true,

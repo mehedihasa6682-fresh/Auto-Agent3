@@ -89,15 +89,19 @@ object CarromGeometrySolver {
         existingStriker: CarromPiece? = null,
         canRepositionStriker: Boolean = true,
         shotMemory: CarromMemoryData? = null,
-        usePhysicsRollout: Boolean = true
+        usePhysicsRollout: Boolean = true,
+        isFreestyle: Boolean = false
     ): CarromShotSolution? {
         if (board.pockets.size < 4) return null
 
-        val primaryTargets = pieces.filter {
-            it.color == myCoinColor || it.color == CoinColor.QUEEN
-        }
-        val targetPieces = primaryTargets.ifEmpty {
+        val targetPieces = if (isFreestyle) {
             pieces.filter { it.color != CoinColor.STRIKER }
+        } else {
+            pieces.filter {
+                it.color == myCoinColor || it.color == CoinColor.QUEEN
+            }.ifEmpty {
+                pieces.filter { it.color != CoinColor.STRIKER }
+            }
         }
         if (targetPieces.isEmpty()) return null
 
@@ -257,7 +261,8 @@ object CarromGeometrySolver {
                 candidates = directPool,
                 screenWidth = screenWidth,
                 screenHeight = screenHeight,
-                shotMemory = shotMemory
+                shotMemory = shotMemory,
+                isFreestyle = isFreestyle
             )
             if (verified != null && (verified.confidenceScore >= 0.56f || bestDirect == null)) {
                 return verified
@@ -293,7 +298,8 @@ object CarromGeometrySolver {
                 candidates = combined,
                 screenWidth = screenWidth,
                 screenHeight = screenHeight,
-                shotMemory = shotMemory
+                shotMemory = shotMemory,
+                isFreestyle = isFreestyle
             )
             if (verifiedBankOrDirect != null && verifiedBankOrDirect.confidenceScore >= 0.52f) {
                 return verifiedBankOrDirect
@@ -329,7 +335,8 @@ object CarromGeometrySolver {
                 candidates = directPool + comboPool + bankPool,
                 screenWidth = screenWidth,
                 screenHeight = screenHeight,
-                shotMemory = shotMemory
+                shotMemory = shotMemory,
+                isFreestyle = isFreestyle
             )
             if (verifiedCombo != null && (verifiedCombo.isSureShot || verifiedCombo.confidenceScore >= 0.50f)) {
                 return verifiedCombo
@@ -364,14 +371,18 @@ object CarromGeometrySolver {
         myCoinColor: CoinColor,
         existingStriker: CarromPiece?,
         shotMemory: CarromMemoryData?,
-        maxProbes: Int = 7
+        maxProbes: Int = 7,
+        isFreestyle: Boolean = false
     ): List<RankedBaselineSpot> {
         if (board.pockets.size < 4) return emptyList()
-        val primaryTargets = pieces.filter {
-            it.color == myCoinColor || it.color == CoinColor.QUEEN
-        }
-        val targetPieces = primaryTargets.ifEmpty {
+        val targetPieces = if (isFreestyle) {
             pieces.filter { it.color != CoinColor.STRIKER }
+        } else {
+            pieces.filter {
+                it.color == myCoinColor || it.color == CoinColor.QUEEN
+            }.ifEmpty {
+                pieces.filter { it.color != CoinColor.STRIKER }
+            }
         }
         if (targetPieces.isEmpty()) return emptyList()
 
@@ -490,7 +501,8 @@ object CarromGeometrySolver {
             candidates = pool,
             shotMemory = shotMemory,
             matchCalibration = shotMemory?.matchCalibration,
-            maxSpots = maxProbes
+            maxSpots = maxProbes,
+            isFreestyle = isFreestyle
         )
     }
 
@@ -506,7 +518,8 @@ object CarromGeometrySolver {
         screenHeight: Int,
         existingStriker: CarromPiece?,
         shotMemory: CarromMemoryData?,
-        usePhysicsRollout: Boolean = true
+        usePhysicsRollout: Boolean = true,
+        isFreestyle: Boolean = false
     ): CarromShotSolution? {
         val inPlaceAttempt = solveBestShot(
             board = board,
@@ -517,13 +530,18 @@ object CarromGeometrySolver {
             existingStriker = existingStriker,
             canRepositionStriker = false,
             shotMemory = shotMemory,
-            usePhysicsRollout = usePhysicsRollout
+            usePhysicsRollout = usePhysicsRollout,
+            isFreestyle = isFreestyle
         )
         if (inPlaceAttempt != null && !inPlaceAttempt.rejectedDueToCollisionOrFoul) {
             return inPlaceAttempt
         }
-        val targetPieces = pieces.filter { it.color == myCoinColor || it.color == CoinColor.QUEEN }
-            .ifEmpty { pieces.filter { it.color != CoinColor.STRIKER } }
+        val targetPieces = if (isFreestyle) {
+            pieces.filter { it.color != CoinColor.STRIKER }
+        } else {
+            pieces.filter { it.color == myCoinColor || it.color == CoinColor.QUEEN }
+                .ifEmpty { pieces.filter { it.color != CoinColor.STRIKER } }
+        }
         val obstacles = pieces.filter { it.color != CoinColor.STRIKER }
         val candidates = buildStrikerCandidates(board, obstacles, existingStriker, canRepositionStriker = false)
         return solveClusterBreakShot(board, targetPieces, obstacles, candidates, screenWidth, screenHeight)
@@ -537,7 +555,8 @@ object CarromGeometrySolver {
         candidates: List<RolloutCandidate>,
         screenWidth: Int,
         screenHeight: Int,
-        shotMemory: CarromMemoryData?
+        shotMemory: CarromMemoryData?,
+        isFreestyle: Boolean = false
     ): CarromShotSolution? {
         val (winner, sim) = CarromPhysicsSimulator.verifyAndRefineCandidates(
             board = board,
@@ -545,11 +564,12 @@ object CarromGeometrySolver {
             myCoinColor = myCoinColor,
             candidates = candidates,
             shotMemory = shotMemory,
-            matchCalibration = shotMemory?.matchCalibration
+            matchCalibration = shotMemory?.matchCalibration,
+            isFreestyle = isFreestyle
         ) ?: return null
 
-        // Do not accept a rollout winner if it explicitly predicts a striker scratch or opponent-only pot
-        if (sim.predictedScratchFoul || sim.predictedOpponentOnlyFoul) {
+        // Do not accept a rollout winner if it explicitly predicts a striker scratch or (in Disc Pool) opponent-only pot
+        if (sim.predictedScratchFoul || (!isFreestyle && sim.predictedOpponentOnlyFoul)) {
             return null
         }
 

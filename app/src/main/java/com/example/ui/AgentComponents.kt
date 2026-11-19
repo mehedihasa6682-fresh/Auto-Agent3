@@ -107,6 +107,7 @@ import androidx.compose.material.icons.rounded.UploadFile
 import androidx.compose.ui.platform.LocalContext
 import com.example.agent.AiRoutingStrategy
 import com.example.agent.CachedActionEntry
+import com.example.agent.CarromRuleMode
 import com.example.agent.SafetyPolicyMode
 import com.example.agent.StepStatus
 import com.example.agent.TaskPlaybook
@@ -1759,6 +1760,42 @@ fun AgentSettingsSheet(
                 onCheckedChange = { enabled ->
                     onUpdate { it.copy(carromPrecisionSolver = enabled) }
                 }
+            )
+
+            Text(
+                text = stringResource(R.string.settings_carrom_rule_label),
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                CarromRuleMode.entries.forEach { ruleMode ->
+                    FilterChip(
+                        selected = settings.carromRuleMode == ruleMode,
+                        onClick = { onUpdate { it.copy(carromRuleMode = ruleMode) } },
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .testTag("carrom_rule_${ruleMode.name.lowercase()}"),
+                        label = { Text(ruleMode.label) },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = CyberTealDark,
+                            selectedLabelColor = CyberTeal
+                        )
+                    )
+                }
+            }
+
+            Text(
+                text = if (settings.carromRuleMode == CarromRuleMode.FREESTYLE) {
+                    stringResource(R.string.settings_carrom_rule_freestyle_desc)
+                } else {
+                    stringResource(R.string.settings_carrom_rule_discpool_desc)
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = TextSecondary
             )
 
             SettingSwitchRow(

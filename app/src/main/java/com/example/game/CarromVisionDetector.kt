@@ -48,7 +48,8 @@ object CarromVisionDetector {
         shotMemory: CarromMemoryData? = null,
         allowStrikerRepositioning: Boolean = true,
         usePhysicsRollout: Boolean = true,
-        useSubPixelRefinement: Boolean = true
+        useSubPixelRefinement: Boolean = true,
+        isFreestyle: Boolean = false
     ): CarromVisionOutcome {
         if (screenshot == null || screenshot.width < 120 || screenshot.height < 120) {
             return CarromVisionOutcome.NeedsAiVision("No screenshot available for Carrom solver.")
@@ -223,7 +224,8 @@ object CarromVisionDetector {
             existingStriker = strikerPiece,
             canRepositionStriker = allowStrikerRepositioning && (sliderKnobPx != null),
             shotMemory = shotMemory,
-            usePhysicsRollout = usePhysicsRollout
+            usePhysicsRollout = usePhysicsRollout,
+            isFreestyle = isFreestyle
         )
 
         return if (solution != null && solution.confidenceScore >= 0.50f) {
@@ -235,7 +237,11 @@ object CarromVisionDetector {
                 boardPieces = promoted
             )
         } else {
-            val myTargetsCount = promoted.count { it.color == myCoinColor || it.color == CoinColor.QUEEN }
+            val myTargetsCount = if (isFreestyle) {
+                promoted.count { it.color != CoinColor.STRIKER }
+            } else {
+                promoted.count { it.color == myCoinColor || it.color == CoinColor.QUEEN }
+            }
             CarromVisionOutcome.NeedsAiVision(
                 diagnostic = "No offline shot (targets=$myTargetsCount, total=${promoted.size}, striker=${strikerPiece != null}); using AI Vision.",
                 boardPieces = promoted

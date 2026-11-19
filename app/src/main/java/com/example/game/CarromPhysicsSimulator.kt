@@ -101,7 +101,8 @@ object CarromPhysicsSimulator {
         myCoinColor: CoinColor,
         candidates: List<RolloutCandidate>,
         shotMemory: CarromMemoryData?,
-        matchCalibration: MatchPhysicsCalibration?
+        matchCalibration: MatchPhysicsCalibration?,
+        isFreestyle: Boolean = false
     ): Pair<RolloutCandidate, RolloutVerificationResult>? {
         if (candidates.isEmpty() || board.pockets.size < 4) return null
 
@@ -158,7 +159,8 @@ object CarromPhysicsSimulator {
                         myCoinColor = myCoinColor,
                         frictionScale = frictionScale,
                         jawSafetyBuffer = jawSafetyBuffer,
-                        extraScratchGuard = extraScratchGuard
+                        extraScratchGuard = extraScratchGuard,
+                        isFreestyle = isFreestyle
                     )
                     totalRollouts++
                     outcomesByKey[pwrFactor to angleDeg] = outcome
@@ -209,11 +211,13 @@ object CarromPhysicsSimulator {
                         myCoinColor = myCoinColor,
                         frictionScale = frictionScale,
                         jawSafetyBuffer = jawSafetyBuffer,
-                        extraScratchGuard = extraScratchGuard
+                        extraScratchGuard = extraScratchGuard,
+                        isFreestyle = isFreestyle
                     )
                 }
                 neighborTotal++
-                val oppOnly = neighborOutcome.pottedOpponentCoins > 0 &&
+                val oppOnly = !isFreestyle &&
+                    neighborOutcome.pottedOpponentCoins > 0 &&
                     neighborOutcome.pottedMyCoins == 0 &&
                     !neighborOutcome.pottedQueen
                 val cleanPot = (neighborOutcome.pottedMyCoins > 0 || neighborOutcome.pottedQueen) &&
@@ -231,7 +235,8 @@ object CarromPhysicsSimulator {
                 strikerNormalizedX = ((candidate.strikerPos.x - board.left) / board.width).coerceIn(0f, 1f)
             ) ?: 0f
 
-            val opponentOnlyFoul = chosenOutcome.pottedOpponentCoins > 0 &&
+            val opponentOnlyFoul = !isFreestyle &&
+                chosenOutcome.pottedOpponentCoins > 0 &&
                 chosenOutcome.pottedMyCoins == 0 &&
                 !chosenOutcome.pottedQueen
 
@@ -243,8 +248,8 @@ object CarromPhysicsSimulator {
                 chosenOutcome.targetDeflectedByNonTarget ||
                 chosenOutcome.kissedObstacleCount > 0
 
-            // User rule: if a collision with another coin STILL cleanly sinks our coin/Queen without foul,
-            // it counts as a Sure Shot! Only colliding shots that MISS or FOUL are rejected.
+            // User rule: if a collision with another coin STILL cleanly sinks a valid coin/Queen without foul,
+            // it counts as a Sure Shot! In Freestyle all colors are valid and ONLY striker scratch is a foul.
             val isSureShot = anyCleanTargetPot && robustness >= 0.55f
             val isCollisionAssisted = isSureShot && hasSecondaryCollision
             val rejectedByCollisionOrFoul = chosenOutcome.strikerScratched ||
@@ -311,7 +316,8 @@ object CarromPhysicsSimulator {
         shotMemory: CarromMemoryData?,
         matchCalibration: MatchPhysicsCalibration?,
         maxSpots: Int = 7,
-        minSeparationPx: Float = max(44f, board.strikerRadiusPx * 1.45f)
+        minSeparationPx: Float = max(44f, board.strikerRadiusPx * 1.45f),
+        isFreestyle: Boolean = false
     ): List<RankedBaselineSpot> {
         if (candidates.isEmpty() || board.pockets.size < 4) return emptyList()
 
@@ -368,9 +374,10 @@ object CarromPhysicsSimulator {
                             myCoinColor = myCoinColor,
                             frictionScale = frictionScale,
                             jawSafetyBuffer = jawSafetyBuffer,
-                            extraScratchGuard = extraScratchGuard
+                            extraScratchGuard = extraScratchGuard,
+                            isFreestyle = isFreestyle
                         )
-                        val oppOnly = outcome.pottedOpponentCoins > 0 && outcome.pottedMyCoins == 0 && !outcome.pottedQueen
+                        val oppOnly = !isFreestyle && outcome.pottedOpponentCoins > 0 && outcome.pottedMyCoins == 0 && !outcome.pottedQueen
                         val cleanPot = (outcome.pottedMyCoins > 0 || outcome.pottedQueen) && !outcome.strikerScratched && !oppOnly
                         if (cleanPot) {
                             angleHitsAtPwr++
@@ -387,7 +394,7 @@ object CarromPhysicsSimulator {
                 }
 
                 val out = bestOutcome ?: continue
-                val oppOnly = out.pottedOpponentCoins > 0 && out.pottedMyCoins == 0 && !out.pottedQueen
+                val oppOnly = !isFreestyle && out.pottedOpponentCoins > 0 && out.pottedMyCoins == 0 && !out.pottedQueen
                 if (out.strikerScratched || oppOnly) continue
 
                 val hasSecondaryCollision = !out.firstStrikerHitIsTarget || out.targetDeflectedByNonTarget || out.kissedObstacleCount > 0
@@ -441,7 +448,8 @@ object CarromPhysicsSimulator {
         myCoinColor: CoinColor,
         frictionScale: Float = 1.0f,
         jawSafetyBuffer: Float = 0f,
-        extraScratchGuard: Boolean = false
+        extraScratchGuard: Boolean = false,
+        isFreestyle: Boolean = false
     ): SingleRolloutOutcome {
         val bodies = ArrayList<SimBody>(pieces.size + 1)
         val strikerBody = SimBody(
@@ -640,10 +648,18 @@ object CarromPhysicsSimulator {
             }
         }
 
-        val pottedMy = bodies.count { it.pocketed && it.color == myCoinColor }
+        val pottedMy = if (isFreestyle) {
+            bodies.count { it.pocketed && (it.color == CoinColor.WHITE || it.color == CoinColor.BLACK) }
+        } else {
+            bodies.count { it.pocketed && it.color == myCoinColor }
+        }
         val pottedQueen = bodies.any { it.pocketed && it.color == CoinColor.QUEEN }
         val oppColor = if (myCoinColor == CoinColor.WHITE) CoinColor.BLACK else CoinColor.WHITE
-        val pottedOpp = bodies.count { it.pocketed && it.color == oppColor }
+        val pottedOpp = if (isFreestyle) {
+            0
+        } else {
+            bodies.count { it.pocketed && it.color == oppColor }
+        }
 
         return SingleRolloutOutcome(
             pottedMyCoins = pottedMy,

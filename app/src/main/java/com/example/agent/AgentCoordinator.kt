@@ -522,11 +522,21 @@ object AgentCoordinator {
 
                     var nextPendingCarromShotCandidate: PendingCarromShotRecord? = null
                     var aiPreCarromCounts: BoardPieceCounts? = null
-                    val myCarromCoinColor = if (
-                        workingMemory.contains("black", ignoreCase = true) ||
-                        goal.contains("black", ignoreCase = true) ||
-                        goal.contains("কালো", ignoreCase = true)
-                    ) {
+                    val effectiveCarromRule = when {
+                        goal.contains("freestyle", ignoreCase = true) ||
+                            goal.contains("ফ্রি স্টাইল") ||
+                            goal.contains("ফ্রিস্টাইল") ||
+                            goal.contains("সব গুটি") -> CarromRuleMode.FREESTYLE
+                        goal.contains("only black", ignoreCase = true) ||
+                            goal.contains("disc pool black", ignoreCase = true) ||
+                            goal.contains("শুধু কালো") -> CarromRuleMode.BLACK_ONLY
+                        goal.contains("only white", ignoreCase = true) ||
+                            goal.contains("disc pool white", ignoreCase = true) ||
+                            goal.contains("শুধু সাদা") -> CarromRuleMode.WHITE_ONLY
+                        else -> currentSettings.carromRuleMode
+                    }
+                    val isFreestyleMode = effectiveCarromRule == CarromRuleMode.FREESTYLE
+                    val myCarromCoinColor = if (effectiveCarromRule == CarromRuleMode.BLACK_ONLY) {
                         CoinColor.BLACK
                     } else {
                         CoinColor.WHITE
@@ -576,7 +586,8 @@ object AgentCoordinator {
                                 shotMemory = currentCarromMem,
                                 allowStrikerRepositioning = allowRepositionByBudget,
                                 usePhysicsRollout = currentSettings.usePhysicsRollout,
-                                useSubPixelRefinement = currentSettings.useSubPixelCircleRefinement
+                                useSubPixelRefinement = currentSettings.useSubPixelCircleRefinement,
+                                isFreestyle = isFreestyleMode
                             )
 
                             // Evaluate the previous Carrom shot once coins have stopped moving
@@ -689,7 +700,8 @@ object AgentCoordinator {
                                             myCoinColor = myCarromCoinColor,
                                             existingStriker = striker,
                                             shotMemory = currentCarromMem,
-                                            maxProbes = CarromTurnMemory.MAX_BASELINE_PROBES
+                                            maxProbes = CarromTurnMemory.MAX_BASELINE_PROBES,
+                                            isFreestyle = isFreestyleMode
                                         )
                                         carromTurnMemory.initializeProbeQueueIfNeeded(rankedSpots)
                                     }
@@ -712,7 +724,8 @@ object AgentCoordinator {
                                             existingStriker = striker,
                                             canRepositionStriker = false,
                                             shotMemory = currentCarromMem,
-                                            usePhysicsRollout = currentSettings.usePhysicsRollout
+                                            usePhysicsRollout = currentSettings.usePhysicsRollout,
+                                            isFreestyle = isFreestyleMode
                                         )
                                     } else {
                                         null
@@ -808,7 +821,8 @@ object AgentCoordinator {
                                                 screenHeight = snapshot.screenHeight,
                                                 shotMemory = currentCarromMem,
                                                 usePhysicsRollout = currentSettings.usePhysicsRollout,
-                                                fallbackSolution = outcome.solution
+                                                fallbackSolution = outcome.solution,
+                                                isFreestyle = isFreestyleMode
                                             )
                                         }
 
@@ -843,7 +857,8 @@ object AgentCoordinator {
                                                 isBankShot = finalSol.isBankShot,
                                                 isComboShot = finalSol.isComboShot,
                                                 isBreakShot = finalSol.isBreakShot,
-                                                preCounts = CarromShotMemoryStore.countBoardPieces(countSource, myCarromCoinColor)
+                                                preCounts = CarromShotMemoryStore.countBoardPieces(countSource, myCarromCoinColor),
+                                                isFreestyle = isFreestyleMode
                                             )
                                         }
 
@@ -851,6 +866,7 @@ object AgentCoordinator {
                                         val dy = finalSol.dragEnd.y - finalSol.strikerPos.y
                                         val shootEndX = (shootStartX + dx).toInt().coerceIn(16, (snapshot.screenWidth - 16).coerceAtLeast(17))
                                         val shootEndY = (shootStartY + dy).toInt().coerceIn(16, (snapshot.screenHeight - 16).coerceAtLeast(17))
+                                        val modeTag = if (isFreestyleMode) "Freestyle" else myCarromCoinColor.name
                                         PlannedAction(
                                             actionType = AgentActionType.DRAG,
                                             targetNodeId = null,
@@ -861,8 +877,8 @@ object AgentCoordinator {
                                             durationMs = 500L,
                                             textToType = null,
                                             waitSeconds = null,
-                                            memoryNote = "Carrom (${myCarromCoinColor.name}) $telemetry: ${finalSol.reason}",
-                                            reason = "Zero-API Carrom $telemetry: ${finalSol.reason} (conf=${(finalSol.confidenceScore * 100).toInt()}%)",
+                                            memoryNote = "Carrom ($modeTag) $telemetry: ${finalSol.reason}",
+                                            reason = "Zero-API Carrom $modeTag $telemetry: ${finalSol.reason} (conf=${(finalSol.confidenceScore * 100).toInt()}%)",
                                             requiresConfirmation = false
                                         )
                                     }
@@ -1247,7 +1263,8 @@ object AgentCoordinator {
                                     isBankShot = false,
                                     isComboShot = false,
                                     isBreakShot = false,
-                                    preCounts = aiPreCarromCounts
+                                    preCounts = aiPreCarromCounts,
+                                    isFreestyle = isFreestyleMode
                                 )
                                 movedStrikerThisTurn = false
                             }

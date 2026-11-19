@@ -1490,4 +1490,92 @@ class AgentLogicUnitTest {
         assertFalse(tm.isTurnActive)
         assertEquals(0, tm.sliderMovesThisTurn)
     }
+
+    @Test
+    fun `freestyle carrom pots white black and red freely and only treats striker scratch as foul`() {
+        val board = com.example.game.CarromBoardLayout(
+            left = 60f,
+            top = 500f,
+            right = 1020f,
+            bottom = 1460f,
+            pockets = listOf(
+                com.example.game.Point2D(120f, 560f),
+                com.example.game.Point2D(960f, 560f),
+                com.example.game.Point2D(120f, 1400f),
+                com.example.game.Point2D(960f, 1400f)
+            ),
+            baselineY = 1320f,
+            coinRadiusPx = 28f,
+            strikerRadiusPx = 35f,
+            pocketRadiusPx = 50f
+        )
+        val striker = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.STRIKER,
+            center = com.example.game.Point2D(540f, 1320f),
+            radiusPx = 35f
+        )
+        // Only BLACK coin positioned cleanly in front of Top-Right pocket
+        val blackTarget = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.BLACK,
+            center = com.example.game.Point2D(790f, 680f),
+            radiusPx = 28f
+        )
+        // White coin tucked away on bottom side (hard cut), so Black coin is the clear Freestyle Sure Shot
+        val distantWhite = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.WHITE,
+            center = com.example.game.Point2D(460f, 940f),
+            radiusPx = 28f
+        )
+
+        val sol = com.example.game.CarromGeometrySolver.solveBestShot(
+            board = board,
+            pieces = listOf(blackTarget, distantWhite, striker),
+            myCoinColor = com.example.game.CoinColor.WHITE,
+            screenWidth = 1080,
+            screenHeight = 2400,
+            existingStriker = striker,
+            canRepositionStriker = false,
+            shotMemory = null,
+            usePhysicsRollout = true,
+            isFreestyle = true
+        )
+        org.junit.Assert.assertNotNull(sol)
+        assertEquals(com.example.game.CoinColor.BLACK, sol!!.targetCoin.color)
+        assertTrue(sol.isSureShot)
+        assertFalse(sol.rejectedDueToCollisionOrFoul)
+
+        // Memory evaluation in Freestyle: potting a black coin counts as clean pot, NOT opponent foul
+        val preCounts = com.example.game.BoardPieceCounts(myCount = 5, opponentCount = 5, queenCount = 1)
+        val shotRecord = com.example.game.PendingCarromShotRecord(
+            myCoinColor = com.example.game.CoinColor.WHITE,
+            targetCoinColor = com.example.game.CoinColor.BLACK,
+            pocketIndex = 1,
+            cutAngleDeg = 18f,
+            strikerNormalizedX = 0.5f,
+            powerStyle = com.example.game.CarromPowerStyle.MEDIUM,
+            movedStrikerWithSlider = false,
+            isBankShot = false,
+            isComboShot = false,
+            isBreakShot = false,
+            preCounts = preCounts,
+            isFreestyle = true
+        )
+        val blackPotEval = com.example.game.CarromShotMemoryStore.evaluateShotOutcome(
+            current = com.example.game.CarromMemoryData(),
+            pendingShot = shotRecord,
+            postCounts = com.example.game.BoardPieceCounts(myCount = 5, opponentCount = 4, queenCount = 1)
+        )
+        assertEquals(com.example.game.CarromShotOutcomeType.POCKETED_MY_COIN, blackPotEval.outcomeType)
+
+        // Only striker scratch (total coin count increasing due to penalty coin return) marks FOUL in Freestyle
+        val scratchEval = com.example.game.CarromShotMemoryStore.evaluateShotOutcome(
+            current = com.example.game.CarromMemoryData(),
+            pendingShot = shotRecord,
+            postCounts = com.example.game.BoardPieceCounts(myCount = 5, opponentCount = 6, queenCount = 1)
+        )
+        assertEquals(com.example.game.CarromShotOutcomeType.FOUL_SCRATCH_OR_PENALTY, scratchEval.outcomeType)
+
+        // Default AgentSettings also defaults to Freestyle mode
+        assertEquals(com.example.agent.CarromRuleMode.FREESTYLE, com.example.agent.AgentSettings().carromRuleMode)
+    }
 }

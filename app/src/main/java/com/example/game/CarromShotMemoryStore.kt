@@ -259,6 +259,7 @@ data class PendingCarromShotRecord(
     val isComboShot: Boolean,
     val isBreakShot: Boolean,
     val preCounts: BoardPieceCounts,
+    val isFreestyle: Boolean = false,
     val timestampMs: Long = System.currentTimeMillis()
 )
 
@@ -357,17 +358,29 @@ class CarromShotMemoryStore(context: Context) {
             val myDelta = postCounts.myCount - pre.myCount
             val oppDelta = postCounts.opponentCount - pre.opponentCount
             val queenPocketed = pre.queenCount > 0 && postCounts.queenCount == 0
+            val totalDelta = (postCounts.myCount + postCounts.opponentCount + postCounts.queenCount) -
+                (pre.myCount + pre.opponentCount + pre.queenCount)
 
-            val outcomeType = when {
-                // My coin count increased -> striker pocketed or foul returned a coin!
-                myDelta > 0 -> CarromShotOutcomeType.FOUL_SCRATCH_OR_PENALTY
-                // Only opponent coin went in while none of mine did -> foul/wrong pot
-                oppDelta < 0 && myDelta >= 0 && !queenPocketed -> CarromShotOutcomeType.FOUL_SCRATCH_OR_PENALTY
-                // Queen went in cleanly without penalty
-                queenPocketed -> CarromShotOutcomeType.POCKETED_QUEEN
-                // My coin decreased -> cleanly pocketed!
-                myDelta < 0 -> CarromShotOutcomeType.POCKETED_MY_COIN
-                else -> CarromShotOutcomeType.MISSED_OR_NO_POT
+            val outcomeType = if (pendingShot.isFreestyle) {
+                when {
+                    // Freestyle: ONLY striker scratch (foul returning a penalty coin) is a foul; White, Black, and Red/Queen are all legal!
+                    totalDelta > 0 -> CarromShotOutcomeType.FOUL_SCRATCH_OR_PENALTY
+                    queenPocketed -> CarromShotOutcomeType.POCKETED_QUEEN
+                    myDelta < 0 || oppDelta < 0 -> CarromShotOutcomeType.POCKETED_MY_COIN
+                    else -> CarromShotOutcomeType.MISSED_OR_NO_POT
+                }
+            } else {
+                when {
+                    // My coin count increased -> striker pocketed or foul returned a coin!
+                    myDelta > 0 -> CarromShotOutcomeType.FOUL_SCRATCH_OR_PENALTY
+                    // Only opponent coin went in while none of mine did -> foul/wrong pot
+                    oppDelta < 0 && myDelta >= 0 && !queenPocketed -> CarromShotOutcomeType.FOUL_SCRATCH_OR_PENALTY
+                    // Queen went in cleanly without penalty
+                    queenPocketed -> CarromShotOutcomeType.POCKETED_QUEEN
+                    // My coin decreased -> cleanly pocketed!
+                    myDelta < 0 -> CarromShotOutcomeType.POCKETED_MY_COIN
+                    else -> CarromShotOutcomeType.MISSED_OR_NO_POT
+                }
             }
 
             val pocketIdx = pendingShot.pocketIndex.coerceIn(0, 3)
@@ -397,7 +410,11 @@ class CarromShotMemoryStore(context: Context) {
             val ps = current.placementStats
             val newPlacementStats = when (outcomeType) {
                 CarromShotOutcomeType.POCKETED_MY_COIN, CarromShotOutcomeType.POCKETED_QUEEN -> {
-                    val potNoun = if (outcomeType == CarromShotOutcomeType.POCKETED_QUEEN) "Queen" else pendingShot.myCoinColor.name
+                    val potNoun = when {
+                        outcomeType == CarromShotOutcomeType.POCKETED_QUEEN -> "Queen"
+                        pendingShot.isFreestyle -> "${pendingShot.targetCoinColor.name} (Freestyle)"
+                        else -> pendingShot.myCoinColor.name
+                    }
                     tacticLesson = "$pocketLabel ($shotKind, $powerLabel, $moveLabel) pocketed $potNoun cleanly!"
                     // Slightly reinforce working power scale toward current effective scale
                     if (pendingShot.movedStrikerWithSlider) {
@@ -413,12 +430,16 @@ class CarromShotMemoryStore(context: Context) {
                     }
                 }
                 CarromShotOutcomeType.FOUL_SCRATCH_OR_PENALTY -> {
-                    // Too hard or straight follow-through scratched striker or hit opponent coin -> soften future power!
+                    // Too hard or straight follow-through scratched striker or hit foul -> soften future power!
                     newPowerScale = (existingStats.learnedPowerScale - 0.08f).coerceIn(0.72f, 1.38f)
                     if (angleBucket == CarromAngleBucket.STRAIGHT) {
                         straightFouls += 1
                     }
-                    foulLesson = "FOUL on $pocketLabel ($shotKind, $powerLabel, $moveLabel): soften pull & verify striker scratch path."
+                    foulLesson = if (pendingShot.isFreestyle) {
+                        "FOUL (Striker Scratch) on $pocketLabel ($shotKind, $powerLabel, $moveLabel): soften pull & verify striker scratch path."
+                    } else {
+                        "FOUL on $pocketLabel ($shotKind, $powerLabel, $moveLabel): soften pull & verify striker scratch path."
+                    }
                     if (pendingShot.movedStrikerWithSlider) {
                         ps.copy(
                             movedAttempts = ps.movedAttempts + 1,
